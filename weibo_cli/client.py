@@ -150,6 +150,8 @@ class WeiboClient:
     def _request(self, method: str, url: str, *, client: httpx.Client | None = None, **kwargs) -> dict[str, Any]:
         self._rate_limit_delay()
         last_exc: Exception | None = None
+        last_status: int | None = None
+        last_body: str = ""
         http = client or self.client
 
         for attempt in range(self._max_retries):
@@ -161,18 +163,29 @@ class WeiboClient:
                     self._merge_response_cookies(resp)
                 self._mark_request()
 
-                logger.info("[#%d] %s %s → %d (%.2fs)", self._request_count, method, url[:60], resp.status_code, elapsed)
+                params = kwargs.get("params")
+                logger.info(
+                    "[#%d] %s %s%s → %d (%.2fs)",
+                    self._request_count, method, url[:60],
+                    f" params={params}" if params else "",
+                    resp.status_code, elapsed,
+                )
 
                 if resp.status_code in (429, 500, 502, 503, 504):
+                    last_status = resp.status_code
+                    last_body = resp.text[:500]
                     wait = (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning("HTTP %d, retrying in %.1fs (%d/%d)", resp.status_code, wait, attempt + 1, self._max_retries)
+                    logger.warning(
+                        "HTTP %d, retrying in %.1fs (%d/%d) body=%s",
+                        resp.status_code, wait, attempt + 1, self._max_retries, last_body,
+                    )
                     time.sleep(wait)
                     continue
 
                 resp.raise_for_status()
                 text = resp.text
                 if text.startswith("<"):
-                    raise WeiboApiError(f"Received HTML instead of JSON from {url}")
+                    raise WeiboApiError(f"Received HTML instead of JSON from {url}: {text[:200]}")
                 return resp.json()
 
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
@@ -182,6 +195,10 @@ class WeiboClient:
 
         if last_exc:
             raise WeiboApiError(f"Request failed after {self._max_retries} retries: {last_exc}") from last_exc
+        if last_status is not None:
+            raise WeiboApiError(
+                f"Request failed after {self._max_retries} retries: HTTP {last_status} body={last_body}"
+            )
         raise WeiboApiError(f"Request failed after {self._max_retries} retries")
 
     def _get(self, url: str, params: dict[str, Any] | None = None, action: str = "", *, unwrap: bool = True) -> dict[str, Any]:
@@ -214,9 +231,13 @@ class WeiboClient:
         }, action="热门Feed", unwrap=False)
 
     def get_friends_timeline(self, count: int = 20, max_id: str = "0") -> dict[str, Any]:
-        """Get friends timeline (关注者 feed, requires auth)."""
+        """Get friends timeline (关注者 feed, requires auth).
+
+        list_id is mandatory: weibo.com's server JS calls .slice() on it and
+        returns HTTP 500 ("Cannot read properties of undefined") when absent.
+        """
         return self._get(FRIENDS_TIMELINE_URL, params={
-            "count": str(count), "max_id": max_id,
+            "count": str(count), "max_id": max_id, "list_id": "",
         }, action="关注Feed", unwrap=False)
 
     def get_feed_groups(self) -> dict[str, Any]:
@@ -298,3 +319,20 @@ class WeiboClient:
     def get_config(self) -> dict[str, Any]:
         """Get app configuration (contains current user info)."""
         return self._get(GET_CONFIG_URL, action="配置")
+
+    def get_current_uid(self) -> str | None:
+        """Get current logged-in user's uid from the x-log-uid response header.
+
+        weibo.com sets x-log-uid on authenticated ajax responses (verified on
+        /ajax/config/get_config and /ajax/feed/friendstimeline). Used by `weibo me`
+        because /ajax/profile/me is 404 and get_config's data has no uid field.
+        Returns None if the header is absent (not logged in / anonymous).
+        """
+        self._rate_limit_delay()
+        resp = self.client.get(GET_CONFIG_URL)
+        self._merge_response_cookies(resp)
+        self._mark_request()
+        logger.info("[#%d] GET %s → %d", self._request_count, GET_CONFIG_URL[:60], resp.status_code)
+        uid = resp.headers.get("x-log-uid")
+        logger.info("Current uid from x-log-uid: %s", uid)
+        return uid

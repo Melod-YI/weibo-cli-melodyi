@@ -119,20 +119,11 @@ def me(as_json, as_yaml):
         console.print(Panel(text, title="👤 个人资料", border_style="cyan"))
 
     def _action(client):
-        # Try the direct ME endpoint first
-        try:
-            data = client._get("/ajax/profile/me", action="个人资料")
-            return data
-        except Exception:
-            pass
-        # Fallback: get config to find current UID, then get profile
-        try:
-            config = client.get_config()
-            uid = str(config.get("uid", config.get("user", {}).get("id", "")))
-            if uid:
-                return client.get_profile(uid)
-        except Exception:
-            pass
-        return {"error": "无法获取个人资料，请确认已登录"}
+        # /ajax/profile/me is 404; get_config's data has no uid. The reliable
+        # source is the x-log-uid response header set on authenticated ajax calls.
+        uid = client.get_current_uid()
+        if not uid:
+            return {"error": "无法获取当前用户 uid，请确认已登录（weibo login）"}
+        return client.get_profile(uid)
 
     handle_command(cred, action=_action, render=_render, as_json=as_json, as_yaml=as_yaml)

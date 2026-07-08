@@ -219,6 +219,64 @@ class TestRepostsAPI:
         assert params["page"] == "2"
 
 
+# ── Friends timeline (regression: missing list_id → HTTP 500) ───────
+
+
+class TestFriendsTimelineAPI:
+    def test_get_friends_timeline_includes_list_id(self, mock_client):
+        """weibo.com /ajax/feed/friendstimeline 500s without list_id
+        (server JS calls .slice() on undefined). The param MUST be sent."""
+        resp_data = {"ok": 1, "statuses": [], "max_id": "0"}
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = json.dumps(resp_data)
+        mock_resp.json.return_value = resp_data
+        mock_resp.cookies = httpx.Cookies()
+        mock_client._http.request.return_value = mock_resp
+
+        mock_client.get_friends_timeline()
+        params = mock_client._http.request.call_args[1].get("params", {})
+        assert "list_id" in params, "list_id is required or weibo returns HTTP 500"
+
+    def test_get_friends_timeline_passes_count_and_max_id(self, mock_client):
+        resp_data = {"ok": 1, "statuses": [], "max_id": "0"}
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = json.dumps(resp_data)
+        mock_resp.json.return_value = resp_data
+        mock_resp.cookies = httpx.Cookies()
+        mock_client._http.request.return_value = mock_resp
+
+        mock_client.get_friends_timeline(count=15, max_id="123")
+        params = mock_client._http.request.call_args[1].get("params", {})
+        assert params["count"] == "15"
+        assert params["max_id"] == "123"
+
+
+# ── Current user uid (regression: /ajax/profile/me is 404) ───────────
+
+
+class TestCurrentUid:
+    def test_get_current_uid_from_x_log_uid_header(self, mock_client):
+        """weibo.com sets x-log-uid on authenticated ajax responses."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"x-log-uid": "5555027006"}
+        mock_resp.cookies = httpx.Cookies()
+        mock_client._http.get.return_value = mock_resp
+
+        assert mock_client.get_current_uid() == "5555027006"
+
+    def test_get_current_uid_none_when_header_missing(self, mock_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        mock_resp.cookies = httpx.Cookies()
+        mock_client._http.get.return_value = mock_resp
+
+        assert mock_client.get_current_uid() is None
+
+
 # ── Retry behavior ──────────────────────────────────────────────────
 
 
@@ -258,6 +316,35 @@ class TestRetryBehavior:
         mock_client._http.request.return_value = html_resp
 
         with pytest.raises(WeiboApiError, match="HTML"):
+            mock_client._request("GET", "/ajax/test")
+
+    def test_500_logs_response_body(self, mock_client, caplog):
+        """HTTP 500 body must be logged so failures are diagnosable."""
+        import logging
+        caplog.set_level(logging.WARNING, logger="weibo_cli.client")
+
+        mock_client._max_retries = 2
+        err = MagicMock()
+        err.status_code = 500
+        err.text = '{"ok":0,"message":"Cannot read properties of undefined (reading \'slice\')"}'
+        err.cookies = httpx.Cookies()
+        mock_client._http.request.return_value = err
+
+        with pytest.raises(WeiboApiError):
+            mock_client._request("GET", "/ajax/test", params={"count": "20"})
+
+        assert "Cannot read properties of undefined" in caplog.text
+
+    def test_500_failure_message_includes_body(self, mock_client):
+        """Final failure error must carry the last response body."""
+        mock_client._max_retries = 2
+        err = MagicMock()
+        err.status_code = 500
+        err.text = '{"ok":0,"message":"boom"}'
+        err.cookies = httpx.Cookies()
+        mock_client._http.request.return_value = err
+
+        with pytest.raises(WeiboApiError, match="boom"):
             mock_client._request("GET", "/ajax/test")
 
 

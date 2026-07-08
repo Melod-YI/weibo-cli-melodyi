@@ -12,6 +12,7 @@ import pytest
 from weibo_cli.auth import (
     Credential,
     QRExpiredError,
+    _exchange_crossdomain,
     _qr_get_session,
     _qr_poll_and_finalize,
     _render_qr_half_blocks,
@@ -377,6 +378,63 @@ class TestQrPollAndFinalize:
         cred = _qr_poll_and_finalize(client, "qrid")
         assert cred.cookies["SUB"] == "fromalt"
         client.close()
+
+
+class TestExchangeCrossdomain:
+    """Direct tests for _exchange_crossdomain fallback logic."""
+
+    def test_merges_cross_and_alt_cookies(self, monkeypatch):
+        # cross 返回 SUB，alt 返回 SUBP
+        def handler(request):
+            if "sina.com.cn" in (request.url.host or ""):
+                return httpx.Response(200, headers={"set-cookie": "SUBP=altval; Path=/"})
+            return httpx.Response(200, headers={"set-cookie": "SUB=crossval; Path=/"})
+
+        transport = httpx.MockTransport(handler)
+        orig_client = httpx.Client
+        monkeypatch.setattr(
+            "weibo_cli.auth.httpx.Client",
+            lambda *a, **kw: orig_client(
+                *a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}
+            ),
+        )
+        cookies = _exchange_crossdomain("https://cross.example.com/x", "alttok")
+        assert cookies.get("SUB") == "crossval"
+        assert cookies.get("SUBP") == "altval"
+
+    def test_cross_fail_alt_success(self, monkeypatch):
+        # cross 抛网络异常，alt 仍成功
+        def handler(request):
+            if "sina.com.cn" in (request.url.host or ""):
+                return httpx.Response(200, headers={"set-cookie": "SUBP=altval; Path=/"})
+            raise httpx.ConnectError("cross fail")
+
+        transport = httpx.MockTransport(handler)
+        orig_client = httpx.Client
+        monkeypatch.setattr(
+            "weibo_cli.auth.httpx.Client",
+            lambda *a, **kw: orig_client(
+                *a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}
+            ),
+        )
+        cookies = _exchange_crossdomain("https://cross.example.com/x", "alttok")
+        assert cookies.get("SUBP") == "altval"
+        assert "SUB" not in cookies  # cross 失败没拿到
+
+    def test_both_fail_returns_empty(self, monkeypatch):
+        def handler(request):
+            raise httpx.ConnectError("fail")
+
+        transport = httpx.MockTransport(handler)
+        orig_client = httpx.Client
+        monkeypatch.setattr(
+            "weibo_cli.auth.httpx.Client",
+            lambda *a, **kw: orig_client(
+                *a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}
+            ),
+        )
+        cookies = _exchange_crossdomain("https://x.example.com/", "alttok")
+        assert cookies == {}
 
 
 class TestQrSessionPersistence:

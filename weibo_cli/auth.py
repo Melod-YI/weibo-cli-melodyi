@@ -38,7 +38,6 @@ from .constants import (
     QR_IMAGE_URL,
     QR_REDIRECT_URL,
     QR_SESSION_FILE,
-    QR_SESSION_TTL_S,  # noqa: F401  (reserved for qr-done session TTL check, Task 6)
     QR_SOURCE,
     QR_VERSION,
     RETCODE_QR_EXPIRED,
@@ -330,7 +329,6 @@ def clear_qr_session(path=None) -> None:
 
 def _write_qr_png(data: str, path: str) -> None:
     """Render *data* as a QR PNG image to *path*."""
-    import qrcode
     img = qrcode.make(data)
     img.save(path)
 
@@ -460,8 +458,6 @@ def _qr_poll_and_finalize(
 
         except httpx.TimeoutException:
             logger.debug("QR check timeout, retrying...")
-        except QRExpiredError:
-            raise
 
         time.sleep(POLL_INTERVAL_S)
 

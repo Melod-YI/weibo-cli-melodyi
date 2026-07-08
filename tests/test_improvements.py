@@ -175,3 +175,30 @@ class TestSearchWeiboAPI:
         mock_mobile.request.assert_called_once()
         call_args = mock_mobile.request.call_args
         assert call_args[1]["params"]["containerid"] == "100103type=1&q=test"
+
+
+# ── handle_command routing tests ──────────────────────────────────────
+
+
+from click.testing import CliRunner
+from weibo_cli.cli import cli
+
+
+def test_non_tty_defaults_to_plain_not_yaml(monkeypatch):
+    """非 TTY stdout 应走 plain render，不再自动 YAML。"""
+    from weibo_cli.auth import Credential
+    monkeypatch.setattr("weibo_cli.commands._common.get_credential", lambda: Credential(cookies={"SUB": "x"}))
+    from weibo_cli.commands import _common
+
+    class _Stub:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_hot_search(self): return {"realtime": [{"word": "测试热搜", "num": 12345, "icon_desc": "热"}]}
+
+    monkeypatch.setattr(_common, "WeiboClient", _Stub)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["hot"])
+    assert result.exit_code == 0
+    assert "realtime:" not in result.output
+    assert "测试热搜" in result.output

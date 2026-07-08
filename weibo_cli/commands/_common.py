@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
 import click
@@ -40,7 +39,7 @@ def require_auth() -> Credential:
     """Get credential or raise AuthRequiredError."""
     cred = get_credential()
     if not cred:
-        console.print("[yellow]⚠️  未登录[/yellow]，使用 [bold]weibo login[/bold] 扫码登录")
+        click.echo("未登录，请先使用 weibo login 登录", err=True)
         raise AuthRequiredError()
     return cred
 
@@ -53,12 +52,12 @@ def structured_output_options(command):
 
 
 def handle_command(credential, *, action, render=None, as_json=False, as_yaml=False) -> Any:
-    """Run action → route output: JSON / YAML(non-TTY) / Rich render.
+    """Run action → route output: JSON / YAML / plain render.
 
-    Also supports SessionExpiredError auto browser refresh retry.
+    Default (no flag, TTY or non-TTY) → plain render.
+    Errors go to stderr. SessionExpiredError triggers browser refresh retry.
     """
     try:
-        # First attempt
         try:
             with WeiboClient(credential) as client:
                 data = action(client)
@@ -71,10 +70,9 @@ def handle_command(credential, *, action, render=None, as_json=False, as_yaml=Fa
             else:
                 raise
 
-        # Output routing
         if as_json:
             click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-        elif as_yaml or not sys.stdout.isatty():
+        elif as_yaml:
             try:
                 import yaml
                 click.echo(yaml.dump(data, allow_unicode=True, default_flow_style=False))
@@ -86,5 +84,5 @@ def handle_command(credential, *, action, render=None, as_json=False, as_yaml=Fa
 
     except WeiboApiError as exc:
         code = error_code_for_exception(exc)
-        console.print(f"[red]❌ [{code}] {exc}[/red]")
+        click.echo(f"error [{code}]: {exc}", err=True)
         return None

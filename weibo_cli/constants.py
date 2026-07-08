@@ -5,6 +5,7 @@ from pathlib import Path
 # ── Config ──────────────────────────────────────────────────────────
 CONFIG_DIR = Path.home() / ".config" / "weibo-cli"
 CREDENTIAL_FILE = CONFIG_DIR / "credential.json"
+QR_SESSION_FILE = CONFIG_DIR / "qr_session.json"
 
 # ── Base URLs ───────────────────────────────────────────────────────
 BASE_URL = "https://weibo.com"
@@ -90,6 +91,8 @@ QR_ENTRY = "miniblog"
 QR_SOURCE = "miniblog"
 QR_REDIRECT_URL = "https://weibo.com/"
 QR_VERSION = "20250520"
+QR_SESSION_TTL_S = 240  # QR code lifetime, must match passport server
+QR_ALT_URL = "https://login.sina.com.cn/sso/login.php?entry=miniblog&alt={alt}&returntype=TEXT"
 
 # ── Response codes ──────────────────────────────────────────────────
 RETCODE_SUCCESS = 20000000

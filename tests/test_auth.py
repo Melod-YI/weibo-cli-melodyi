@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from unittest.mock import MagicMock
 
@@ -144,6 +145,7 @@ class TestCredentialPersistence:
         assert loaded is not None
         assert loaded.cookies["SUB"] == "old"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod 0o600 is a no-op on Windows")
     def test_file_permissions(self, tmp_path, monkeypatch):
         monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
         monkeypatch.setattr("weibo_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json")

@@ -143,3 +143,102 @@ def test_qr_start_does_not_trigger_default_login(monkeypatch):
     runner.invoke(cli, ["login", "qr-start"])
     assert called["get_credential"] == 0
     assert called["qr_login"] == 0
+
+
+def test_qr_done_success_clears_session(monkeypatch, tmp_path):
+    """qr-done 成功 → 删 session + 输出 status:success。"""
+    import weibo_cli.auth as auth_core
+    from weibo_cli.auth import Credential
+
+    session_file = tmp_path / "qr_session.json"
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", session_file)
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: {
+        "qrid": "q", "csrf_token": "c", "cookies": {"SUB": "x"},
+        "scan_url": "s", "created_at": __import__("time").time(),
+    })
+    monkeypatch.setattr(auth_core, "_qr_poll_and_finalize", lambda client, qrid, **kw: Credential(cookies={"SUB": "final"}))
+    deleted = {"called": False}
+    monkeypatch.setattr(auth_core, "clear_qr_session", lambda path=None: deleted.__setitem__("called", True))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 0
+    assert "status: success" in result.output
+    assert deleted["called"] is True
+
+
+def test_qr_done_timeout_keeps_session(monkeypatch, tmp_path):
+    """qr-done 超时 → 保留 session + exit 1。"""
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: {
+        "qrid": "q", "csrf_token": "c", "cookies": {"SUB": "x"},
+        "scan_url": "s", "created_at": __import__("time").time(),
+    })
+    def _raise(*a, **kw):
+        raise TimeoutError("poll timed out")
+    monkeypatch.setattr(auth_core, "_qr_poll_and_finalize", _raise)
+    deleted = {"called": False}
+    monkeypatch.setattr(auth_core, "clear_qr_session", lambda path=None: deleted.__setitem__("called", True))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 1
+    assert deleted["called"] is False  # 超时保留 session
+
+
+def test_qr_done_expired_clears_session(monkeypatch, tmp_path):
+    """qr-done EXPIRED → 删 session + exit 1。"""
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: {
+        "qrid": "q", "csrf_token": "c", "cookies": {"SUB": "x"},
+        "scan_url": "s", "created_at": __import__("time").time(),
+    })
+    def _raise(*a, **kw):
+        raise auth_core.QRExpiredError()
+    monkeypatch.setattr(auth_core, "_qr_poll_and_finalize", _raise)
+    deleted = {"called": False}
+    monkeypatch.setattr(auth_core, "clear_qr_session", lambda path=None: deleted.__setitem__("called", True))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 1
+    assert deleted["called"] is True
+
+
+def test_qr_done_ttl_expired_clears_session(monkeypatch, tmp_path):
+    """qr-done session 文件超 240s TTL → 删 session + exit 1。"""
+    import time as _time
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: {
+        "qrid": "q", "csrf_token": "c", "cookies": {"SUB": "x"},
+        "scan_url": "s", "created_at": _time.time() - 999,  # 远超 TTL
+    })
+    poll_called = {"called": False}
+    monkeypatch.setattr(auth_core, "_qr_poll_and_finalize", lambda *a, **kw: poll_called.__setitem__("called", True))
+    deleted = {"called": False}
+    monkeypatch.setattr(auth_core, "clear_qr_session", lambda path=None: deleted.__setitem__("called", True))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 1
+    assert poll_called["called"] is False  # TTL 过期不轮询
+    assert deleted["called"] is True
+
+
+def test_qr_done_no_session_exits(monkeypatch, tmp_path):
+    """qr-done 无 session 文件 → exit 1。"""
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "nope.json")
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: None)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 1
+    assert "未找到 QR 会话" in (result.output + (result.stderr or ""))

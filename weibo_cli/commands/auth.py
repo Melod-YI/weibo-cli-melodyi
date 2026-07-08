@@ -152,6 +152,10 @@ def qr_done(timeout, session_path):
         except TimeoutError:
             click.echo("status: 轮询超时（会话已保留，可再次运行 weibo login qr-done 重试）", err=True)
             sys.exit(1)
+        except RuntimeError as e:
+            clear_qr_session(f)
+            click.echo(f"error: {e}", err=True)
+            sys.exit(1)
 
     click.echo("status: success")
     click.echo(f"credential saved: {CREDENTIAL_FILE}")

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import click
-from rich.panel import Panel
-from rich.table import Table
 
-from ._common import console, format_count, handle_command, require_auth, strip_html, structured_output_options
+from ._common import format_count, handle_command, require_auth, strip_html, structured_output_options
 from .renderers import render_comment_list, render_weibo_list
 
 
@@ -20,25 +18,16 @@ def hot(count, as_json, as_yaml):
     cred = get_credential()
 
     def _render(data):
-        table = Table(title="🔥 微博热搜", show_lines=False, padding=(0, 1))
-        table.add_column("#", style="dim", width=4, justify="right")
-        table.add_column("热搜词", style="bold")
-        table.add_column("标签", width=4)
-        table.add_column("热度", justify="right", style="cyan")
-
         items = data.get("realtime") or data.get("band_list") or []
+        if not items:
+            click.echo("（无热搜）")
+            return
         for i, item in enumerate(items[:count], 1):
             word = item.get("word", item.get("note", ""))
             icon = item.get("icon_desc", item.get("label_name", ""))
             num = item.get("num", item.get("raw_hot", ""))
-
-            icon_color = "red" if icon == "沸" else "yellow" if icon == "热" else "green" if icon == "新" else ""
-            icon_text = f"[{icon_color}]{icon}[/{icon_color}]" if icon_color and icon else icon
             num_str = format_count(num) if num else ""
-
-            table.add_row(str(i), word, icon_text, num_str)
-
-        console.print(table)
+            click.echo(f"#{i:<3} {word}  {icon}  {num_str}")
 
     def _action(client):
         return client.get_hot_search()
@@ -57,7 +46,7 @@ def feed(count, as_json, as_yaml):
 
     def _render(data):
         statuses = data.get("statuses", [])
-        render_weibo_list(statuses, count=count, border_style="blue", empty_msg="[yellow]暂无热门微博[/yellow]")
+        render_weibo_list(statuses, count=count, empty_msg="暂无热门微博")
 
     def _action(client):
         return client.get_hot_timeline(count=min(count, 20))
@@ -84,18 +73,17 @@ def detail(mblogid, as_json, as_yaml):
         likes = data.get("attitudes_count", 0)
         reads = data.get("reads_count", 0)
 
-        content = f"[bold cyan]{name}{verified}[/bold cyan]"
+        lines = [f"@{name}{verified}"]
         if user.get("verified_reason"):
-            content += f"  [dim]{user['verified_reason']}[/dim]"
-        content += f"\n[dim]{created}  via {source}[/dim]\n\n"
-        content += f"{text}\n\n"
-
+            lines.append(f"  {user['verified_reason']}")
+        lines.append(f"{created}{f'  via {source}' if source else ''}")
+        lines.append("")
+        lines.append(text)
+        lines.append("")
         if data.get("pic_ids"):
-            content += f"[dim]📷 {len(data['pic_ids'])} 张图片[/dim]\n"
-
-        content += f"👁 {reads}  💬 {comments_count}  🔁 {reposts}  ❤️ {likes}"
-
-        console.print(Panel(content, title=f"微博 {data.get('mblogid', '')}", border_style="cyan", padding=(0, 1)))
+            lines.append(f"图片{len(data['pic_ids'])} 张")
+        lines.append(f"阅读{reads} 评论{comments_count} 转发{reposts} 赞{likes}  ID:{data.get('mblogid', '')}")
+        click.echo("\n".join(lines))
 
     def _action(client):
         return client.get_weibo_detail(mblogid)
@@ -134,17 +122,13 @@ def trending(count, as_json, as_yaml):
 
     def _render(data):
         items = data.get("realtime", [])
-        table = Table(title="📈 实时搜索趋势", show_lines=False, padding=(0, 1))
-        table.add_column("#", style="dim", width=4, justify="right")
-        table.add_column("关键词", style="bold")
-        table.add_column("描述", style="dim")
-
+        if not items:
+            click.echo("（无趋势）")
+            return
         for i, item in enumerate(items[:count], 1):
             word = item.get("word", "")
-            desc = str(item.get("description", ""))
-            table.add_row(str(i), word, desc[:40])
-
-        console.print(table)
+            desc = str(item.get("description", ""))[:40]
+            click.echo(f"#{i:<3} {word}  {desc}")
 
     def _action(client):
         return client.get_search_band()
@@ -186,10 +170,10 @@ def search(keyword, count, page, as_json, as_yaml):
                             statuses.append(mblog)
 
         if not statuses:
-            console.print(f"[yellow]未找到 \"{keyword}\" 相关微博[/yellow]")
+            click.echo(f'未找到 "{keyword}" 相关微博')
             return
 
-        render_weibo_list(statuses, count=count, border_style="magenta")
+        render_weibo_list(statuses, count=count)
 
     def _action(client):
         return client.search_weibo(keyword, page=page)

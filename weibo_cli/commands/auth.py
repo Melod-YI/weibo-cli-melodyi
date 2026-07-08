@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 
 import click
-from rich.panel import Panel
 
-from ._common import console, handle_command, require_auth, structured_output_options
+from ._common import format_count, handle_command, require_auth, structured_output_options
 
 
 @click.command()
@@ -22,37 +21,37 @@ def login(qrcode, cookie_source):
         try:
             cred = qr_login()
             if cred:
-                console.print("[green]✅ 登录成功！[/green]")
+                click.echo("登录成功")
             else:
-                console.print("[red]❌ 登录失败[/red]")
+                click.echo("error: 登录失败", err=True)
         except Exception as e:
-            console.print(f"[red]❌ 登录失败: {e}[/red]")
+            click.echo(f"error: 登录失败: {e}", err=True)
         return
 
     if cookie_source:
         # Try specific browser only
         cred = extract_browser_credential(cookie_source=cookie_source)
         if cred:
-            console.print(f"[green]✅ 已从 {cookie_source} 提取 Cookie 并登录[/green]")
+            click.echo(f"已从 {cookie_source} 提取 Cookie 并登录")
         else:
-            console.print(f"[yellow]⚠️  未在 {cookie_source} 找到有效 Cookie[/yellow]")
-            console.print("  提示: 使用 [bold]weibo login --qrcode[/bold] 扫码登录")
+            click.echo(f"未在 {cookie_source} 找到有效 Cookie", err=True)
+            click.echo("提示: 使用 weibo login --qrcode 扫码登录", err=True)
         return
 
     # Default: try saved → browser → QR
     cred = get_credential()
     if cred:
-        console.print("[green]✅ 已登录[/green] (如需重新登录请先执行 weibo logout)")
+        click.echo("已登录（如需重新登录请先执行 weibo logout）")
         return
 
     try:
         cred = qr_login()
         if cred:
-            console.print("[green]✅ 登录成功！[/green]")
+            click.echo("登录成功")
         else:
-            console.print("[red]❌ 登录失败[/red]")
+            click.echo("error: 登录失败", err=True)
     except Exception as e:
-        console.print(f"[red]❌ 登录失败: {e}[/red]")
+        click.echo(f"error: 登录失败: {e}", err=True)
 
 
 @click.command()
@@ -61,16 +60,14 @@ def logout():
     from ..auth import clear_credential
 
     clear_credential()
-    console.print("[green]✅ 已清除登录凭证[/green]")
+    click.echo("已清除登录凭证")
 
 
 @click.command()
 @structured_output_options
 def status(as_json, as_yaml):
     """查看当前登录状态"""
-    import sys
-
-    from ..auth import get_credential
+    from ._common import get_credential
 
     cred = get_credential()
     info = {
@@ -79,7 +76,7 @@ def status(as_json, as_yaml):
     }
     if as_json:
         click.echo(json.dumps(info, indent=2))
-    elif as_yaml or not sys.stdout.isatty():
+    elif as_yaml:
         try:
             import yaml
             click.echo(yaml.dump(info, allow_unicode=True, default_flow_style=False))
@@ -87,9 +84,9 @@ def status(as_json, as_yaml):
             click.echo(json.dumps(info, indent=2))
     else:
         if cred:
-            console.print(f"[green]✅ 已登录[/green] ({len(cred.cookies)} cookies)")
+            click.echo(f"authenticated cookies={len(cred.cookies)}")
         else:
-            console.print("[yellow]⚠️  未登录[/yellow]")
+            click.echo("unauthenticated")
 
 
 @click.command()
@@ -100,30 +97,35 @@ def me(as_json, as_yaml):
 
     def _render(data):
         user = data.get("user", data)
+        if not user.get("screen_name"):
+            click.echo("无法获取个人资料")
+            return
         lines = []
-        if user.get("screen_name"):
-            lines.append(f"[bold]昵称[/bold]: {user['screen_name']}")
+        lines.append(f"昵称: {user['screen_name']}")
         if user.get("description"):
-            lines.append(f"[bold]简介[/bold]: {user['description']}")
+            lines.append(f"简介: {user['description']}")
+        stats = []
         if user.get("followers_count") is not None:
-            lines.append(f"[bold]粉丝[/bold]: {user['followers_count']}")
+            stats.append(f"粉丝: {format_count(user['followers_count'])}")
         if user.get("friends_count") is not None:
-            lines.append(f"[bold]关注[/bold]: {user['friends_count']}")
+            stats.append(f"关注: {format_count(user['friends_count'])}")
         if user.get("statuses_count") is not None:
-            lines.append(f"[bold]微博[/bold]: {user['statuses_count']}")
+            stats.append(f"微博: {format_count(user['statuses_count'])}")
+        if stats:
+            lines.append("  ".join(stats))
         if user.get("location"):
-            lines.append(f"[bold]位置[/bold]: {user['location']}")
+            lines.append(f"位置: {user['location']}")
         if user.get("verified_reason"):
-            lines.append(f"[bold]认证[/bold]: {user['verified_reason']}")
-        text = "\n".join(lines) if lines else "无法获取个人资料"
-        console.print(Panel(text, title="👤 个人资料", border_style="cyan"))
+            lines.append(f"认证: {user['verified_reason']}")
+        click.echo("\n".join(lines))
 
     def _action(client):
         # /ajax/profile/me is 404; get_config's data has no uid. The reliable
         # source is the x-log-uid response header set on authenticated ajax calls.
         uid = client.get_current_uid()
         if not uid:
-            return {"error": "无法获取当前用户 uid，请确认已登录（weibo login）"}
+            click.echo("error: 无法获取当前 uid，请确认已登录（weibo login）", err=True)
+            raise SystemExit(1)
         return client.get_profile(uid)
 
     handle_command(cred, action=_action, render=_render, as_json=as_json, as_yaml=as_yaml)

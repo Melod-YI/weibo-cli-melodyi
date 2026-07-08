@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import click
-from rich.panel import Panel
 
-from ._common import console, format_count, handle_command, require_auth, structured_output_options
+from ._common import format_count, handle_command, require_auth, structured_output_options
 from .renderers import render_repost_list, render_user_table, render_weibo_list
 
 
@@ -21,36 +20,27 @@ def profile(uid, as_json, as_yaml):
         lines = []
         name = user.get("screen_name", "未知")
         verified = " ✓" if user.get("verified") else ""
-        lines.append(f"[bold cyan]{name}{verified}[/bold cyan]")
+        lines.append(f"昵称: {name}{verified}")
         if user.get("verified_reason"):
-            lines.append(f"[dim]{user['verified_reason']}[/dim]")
+            lines.append(f"认证: {user['verified_reason']}")
         if user.get("description"):
-            lines.append(f"\n{user['description']}")
-
-        lines.append("")
+            lines.append(f"简介: {user['description']}")
         stats = []
         if user.get("followers_count") is not None:
-            stats.append(f"[bold]粉丝[/bold] {format_count(user['followers_count'])}")
+            stats.append(f"粉丝: {format_count(user['followers_count'])}")
         if user.get("friends_count") is not None:
-            stats.append(f"[bold]关注[/bold] {format_count(user['friends_count'])}")
+            stats.append(f"关注: {format_count(user['friends_count'])}")
         if user.get("statuses_count") is not None:
-            stats.append(f"[bold]微博[/bold] {format_count(user['statuses_count'])}")
+            stats.append(f"微博: {format_count(user['statuses_count'])}")
         if stats:
-            lines.append("  |  ".join(stats))
-
+            lines.append("  ".join(stats))
         if user.get("location"):
-            lines.append(f"\n📍 {user['location']}")
-        if user.get("gender"):
-            gender = "♂ 男" if user["gender"] == "m" else "♀ 女" if user["gender"] == "f" else ""
-            if gender:
-                lines.append(f"  {gender}")
-
-        console.print(Panel("\n".join(lines), title=f"@{name}", border_style="cyan", padding=(0, 1)))
-
+            lines.append(f"位置: {user['location']}")
+        click.echo("\n".join(lines))
         tabs = data.get("tabList", [])
         if tabs:
             tab_names = [t.get("tabName", t.get("name", "")) for t in tabs]
-            console.print(f"[dim]可用 Tab: {' | '.join(tab_names)}[/dim]")
+            click.echo(f"可用 Tab: {' | '.join(tab_names)}")
 
     def _action(client):
         return client.get_profile(uid)
@@ -87,7 +77,7 @@ def following(uid, page, as_json, as_yaml):
 
     def _render(data):
         users = data.get("users", []) if isinstance(data, dict) else data
-        render_user_table(users, title="关注列表", empty_msg="[yellow]暂无关注[/yellow]")
+        render_user_table(users, title="关注列表", empty_msg="暂无关注")
 
     def _action(client):
         return client.get_following(uid, page=page)
@@ -105,7 +95,7 @@ def followers(uid, page, as_json, as_yaml):
 
     def _render(data):
         users = data.get("users", []) if isinstance(data, dict) else data
-        render_user_table(users, title="粉丝列表", empty_msg="[yellow]暂无粉丝[/yellow]")
+        render_user_table(users, title="粉丝列表", empty_msg="暂无粉丝")
 
     def _action(client):
         return client.get_followers(uid, page=page)
@@ -143,7 +133,7 @@ def home(count, as_json, as_yaml):
 
     def _render(data):
         statuses = data.get("statuses", [])
-        render_weibo_list(statuses, count=count, border_style="green", empty_msg="[yellow]暂无关注者微博[/yellow]")
+        render_weibo_list(statuses, count=count, empty_msg="暂无关注者微博")
 
     def _action(client):
         return client.get_friends_timeline(count=min(count, 50))

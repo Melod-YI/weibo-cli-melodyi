@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import pytest
+from click.testing import CliRunner
 
+from weibo_cli.auth import Credential
+from weibo_cli.cli import cli
 from weibo_cli.commands.renderers import (
     render_comment_list,
     render_repost_list,
@@ -84,3 +87,40 @@ def test_render_comment_list_empty(capture):
 def test_render_repost_list_empty(capture):
     render_repost_list([])
     assert capture == ["暂无转发"]
+
+
+def _stub_client(monkeypatch, methods):
+    """让 handle_command 用一个返回固定数据的 stub WeiboClient。"""
+    from weibo_cli.commands import _common
+
+    class _Stub:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    for k, v in methods.items():
+        setattr(_Stub, k, lambda self, *a, _v=v: _v)
+    monkeypatch.setattr(_common, "WeiboClient", _Stub)
+    monkeypatch.setattr("weibo_cli.commands._common.get_credential", lambda: Credential(cookies={"SUB": "x"}))
+
+
+def test_hot_command_plain(monkeypatch):
+    _stub_client(monkeypatch, {"get_hot_search": {"realtime": [
+        {"word": "科技", "num": 12345, "icon_desc": "热"},
+        {"word": "娱乐", "num": 98765, "icon_desc": "沸"},
+    ]}})
+    runner = CliRunner()
+    result = runner.invoke(cli, ["hot"])
+    assert result.exit_code == 0
+    assert "科技" in result.output and "娱乐" in result.output
+    assert "1.2万" in result.output
+    for c in "│┌┐└┘":
+        assert c not in result.output
+
+
+def test_status_command_plain(monkeypatch):
+    monkeypatch.setattr("weibo_cli.commands._common.get_credential", lambda: Credential(cookies={"SUB": "x", "SUBP": "y"}))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0
+    assert "authenticated" in result.output
+    assert "cookies=2" in result.output

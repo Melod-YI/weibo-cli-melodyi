@@ -32,13 +32,18 @@ from .constants import (
     CREDENTIAL_FILE,
     PASSPORT_HEADERS,
     PASSPORT_URL,
+    QR_ALT_URL,
     QR_CHECK_URL,
     QR_ENTRY,
     QR_IMAGE_URL,
     QR_REDIRECT_URL,
+    QR_SESSION_FILE,
+    QR_SESSION_TTL_S,  # noqa: F401  (reserved for qr-done session TTL check, Task 6)
     QR_SOURCE,
     QR_VERSION,
+    RETCODE_QR_EXPIRED,
     RETCODE_QR_NOT_SCANNED,
+    RETCODE_QR_SCANNED,
     RETCODE_SUCCESS,
     SSO_SIGNIN_URL,
 )
@@ -281,17 +286,192 @@ def _display_qr_in_terminal(data: str) -> bool:
     return True
 
 
-# ── QR Login flow ───────────────────────────────────────────────────
+# ── QR session persistence ──────────────────────────────────────────
+
+
+def save_qr_session(session: dict) -> None:
+    """Persist QR session (qrid + csrf + passport cookies) for qr-done."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "qrid": session["qrid"],
+        "csrf_token": session["csrf_token"],
+        "cookies": session["cookies"],
+        "scan_url": session["scan_url"],
+        "created_at": time.time(),
+    }
+    QR_SESSION_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    try:
+        QR_SESSION_FILE.chmod(0o600)
+    except OSError:
+        # chmod is a no-op on Windows; ignore
+        pass
+    logger.info("QR session saved to %s", QR_SESSION_FILE)
+
+
+def load_qr_session(path=None) -> dict | None:
+    """Load QR session from file. Returns None if missing/unreadable."""
+    f = path or QR_SESSION_FILE
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to load QR session: %s", e)
+        return None
+
+
+def clear_qr_session(path=None) -> None:
+    """Remove QR session file."""
+    f = path or QR_SESSION_FILE
+    if f.exists():
+        f.unlink()
+        logger.info("QR session removed: %s", f)
+
+
+def _write_qr_png(data: str, path: str) -> None:
+    """Render *data* as a QR PNG image to *path*."""
+    import qrcode
+    img = qrcode.make(data)
+    img.save(path)
+
+
+# ── QR Login flow (decomposed for reuse by qr-start / qr-done) ──────
+
+
+def _qr_get_session(client: httpx.Client) -> dict:
+    """Steps 1-2: obtain CSRF token, qrid, scan_url, and a cookie snapshot.
+
+    Returns {qrid, scan_url, csrf_token, cookies}. Cookies are snapshotted
+    AFTER the image request (it may set additional cookies).
+    """
+    # Step 1: Get CSRF token by visiting login page
+    logger.info("Getting CSRF token from login page...")
+    resp = client.get(
+        SSO_SIGNIN_URL,
+        params={"entry": QR_ENTRY, "source": QR_SOURCE, "url": QR_REDIRECT_URL},
+    )
+    resp.raise_for_status()
+    csrf_token = client.cookies.get("X-CSRF-TOKEN")
+    if not csrf_token:
+        raise RuntimeError("Failed to obtain X-CSRF-TOKEN from passport.weibo.com")
+    client.headers["x-csrf-token"] = csrf_token
+    logger.info("Got CSRF token: %s...", csrf_token[:20])
+
+    # Step 2: Get QR code
+    logger.info("Requesting QR code...")
+    resp = client.get(QR_IMAGE_URL, params={"entry": QR_ENTRY, "size": "180"})
+    resp.raise_for_status()
+    qr_data = resp.json()
+    if qr_data.get("retcode") != RETCODE_SUCCESS:
+        raise RuntimeError(f"Failed to get QR code: {qr_data.get('msg', 'Unknown error')}")
+
+    qrid = qr_data["data"]["qrid"]
+    image_url = qr_data["data"]["image"]
+    parsed = urlparse(image_url)
+    qs = parse_qs(parsed.query)
+    scan_url = qs.get("data", [f"https://passport.weibo.cn/signin/qrcode/scan?qr={qrid}"])[0]
+    logger.info("Got qrid: %s", qrid)
+
+    # Snapshot cookies AFTER image request
+    cookies = dict(client.cookies.items())
+    return {"qrid": qrid, "scan_url": scan_url, "csrf_token": csrf_token, "cookies": cookies}
+
+
+def _exchange_crossdomain(cross_url: str, alt: str) -> dict:
+    """Follow crossdomain URL + alt token exchange, return collected cookies."""
+    cookies: dict[str, str] = {}
+    ua = PASSPORT_HEADERS["User-Agent"]
+    if cross_url:
+        try:
+            with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30), headers={"User-Agent": ua}) as c:
+                c.get(cross_url)
+                for k, v in c.cookies.items():
+                    cookies[k] = v
+        except Exception as e:
+            logger.warning("Cross-domain follow failed: %s", e)
+    if alt:
+        try:
+            alt_url = QR_ALT_URL.format(alt=alt)
+            with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30), headers={"User-Agent": ua}) as c:
+                c.get(alt_url)
+                for k, v in c.cookies.items():
+                    cookies[k] = v
+        except Exception as e:
+            logger.warning("Alt token exchange failed: %s", e)
+    return cookies
+
+
+def _qr_poll_and_finalize(
+    client: httpx.Client,
+    qrid: str,
+    *,
+    on_status=None,
+    poll_timeout: float = POLL_TIMEOUT_S,
+) -> Credential:
+    """Steps 4-5: poll /sso/v2/qrcode/check, on success exchange cookies and save.
+
+    on_status(retcode, msg) is called on each retcode change (for progress).
+    Raises QRExpiredError on EXPIRED retcode; TimeoutError on poll exhaustion.
+    """
+    start_time = time.time()
+    last_status = None
+
+    while (time.time() - start_time) < poll_timeout:
+        try:
+            resp = client.get(
+                QR_CHECK_URL,
+                params={
+                    "entry": QR_ENTRY,
+                    "source": QR_SOURCE,
+                    "url": QR_REDIRECT_URL,
+                    "qrid": qrid,
+                    "rid": "",
+                    "ver": QR_VERSION,
+                },
+            )
+            resp.raise_for_status()
+            check_data = resp.json()
+            retcode = check_data.get("retcode")
+            msg = check_data.get("msg", "")
+
+            if retcode != last_status:
+                logger.info("QR check: retcode=%s msg=%s", retcode, msg)
+                last_status = retcode
+                if on_status:
+                    on_status(retcode, msg)
+
+            if retcode == RETCODE_SUCCESS:
+                data = check_data.get("data", {})
+                passport_cookies = dict(client.cookies.items())
+                cross_cookies = _exchange_crossdomain(data.get("url", ""), data.get("alt", ""))
+                cookies = {**passport_cookies, **cross_cookies}
+                if not cookies:
+                    raise RuntimeError("Login succeeded but no cookies were obtained")
+                credential = Credential(cookies=cookies)
+                save_credential(credential)
+                return credential
+            elif retcode == RETCODE_QR_NOT_SCANNED:
+                pass  # keep polling
+            elif retcode == RETCODE_QR_SCANNED:
+                pass  # scanned, waiting for confirm
+            elif retcode == RETCODE_QR_EXPIRED:
+                raise QRExpiredError()
+            # unknown retcode: keep polling
+
+        except httpx.TimeoutException:
+            logger.debug("QR check timeout, retrying...")
+        except QRExpiredError:
+            raise
+
+        time.sleep(POLL_INTERVAL_S)
+
+    raise TimeoutError(f"QR poll timed out after {poll_timeout}s")
 
 
 def qr_login() -> Credential:
-    """Full QR code login flow for Weibo.
+    """Full blocking QR login flow for terminal (human use via --qrcode).
 
-    1. Visit passport.weibo.com/sso/signin to get X-CSRF-TOKEN cookie
-    2. GET /sso/v2/qrcode/image → qrid + image URL
-    3. Extract scan URL from image URL, render QR in terminal
-    4. Poll /sso/v2/qrcode/check every 2s
-    5. On success, follow crossdomain URL for session cookies
+    Reuses _qr_get_session + _qr_poll_and_finalize.
     """
     with httpx.Client(
         base_url=PASSPORT_URL,
@@ -299,152 +479,22 @@ def qr_login() -> Credential:
         follow_redirects=True,
         timeout=httpx.Timeout(30),
     ) as client:
-        # Step 1: Get CSRF token by visiting login page
-        logger.info("Getting CSRF token from login page...")
-        resp = client.get(
-            SSO_SIGNIN_URL,
-            params={
-                "entry": QR_ENTRY,
-                "source": QR_SOURCE,
-                "url": QR_REDIRECT_URL,
-            },
-        )
-        resp.raise_for_status()
+        session = _qr_get_session(client)
+        import click
+        click.echo("请使用微博APP扫描以下二维码登录：", err=True)
+        click.echo("打开微博手机APP → 我的页面 → 扫一扫", err=True)
+        _display_qr_in_terminal(session["scan_url"])
+        click.echo(f"等待扫码中...（超时: {POLL_TIMEOUT_S // 60} 分钟）", err=True)
 
-        csrf_token = client.cookies.get("X-CSRF-TOKEN")
-        if not csrf_token:
-            raise RuntimeError("Failed to obtain X-CSRF-TOKEN from passport.weibo.com")
+        def _on_status(retcode, msg):
+            if retcode == RETCODE_QR_SCANNED:
+                click.echo("已扫码，请在手机上确认登录", err=True)
+            elif retcode == RETCODE_SUCCESS:
+                click.echo("扫码成功，正在完成登录", err=True)
 
-        logger.info("Got CSRF token: %s...", csrf_token[:20])
-
-        # Update headers with CSRF token
-        client.headers["x-csrf-token"] = csrf_token
-
-        # Step 2: Get QR code
-        logger.info("Requesting QR code...")
-        resp = client.get(QR_IMAGE_URL, params={"entry": QR_ENTRY, "size": "180"})
-        resp.raise_for_status()
-        qr_data = resp.json()
-
-        if qr_data.get("retcode") != RETCODE_SUCCESS:
-            raise RuntimeError(f"Failed to get QR code: {qr_data.get('msg', 'Unknown error')}")
-
-        qrid = qr_data["data"]["qrid"]
-        image_url = qr_data["data"]["image"]
-        logger.info("Got qrid: %s", qrid)
-
-        # Step 3: Extract scan URL from image URL and render QR
-        # The QR encodes: https://passport.weibo.cn/signin/qrcode/scan?qr={qrid}&...
-        parsed = urlparse(image_url)
-        qs = parse_qs(parsed.query)
-        scan_url = qs.get("data", [f"https://passport.weibo.cn/signin/qrcode/scan?qr={qrid}"])[0]
-
-        print("\n📱 请使用 微博APP 扫描以下二维码登录:\n")
-        print("   打开微博手机APP → 我的页面 → 扫一扫\n")
-        _display_qr_in_terminal(scan_url)
-        print(f"\n⏳ 等待扫码中... (超时: {POLL_TIMEOUT_S // 60} 分钟)")
-        print(f"   (QR ID: {qrid[:20]}...)\n")
-
-        # Step 4: Poll for scan status
-        start_time = time.time()
-        last_status = None
-
-        while (time.time() - start_time) < POLL_TIMEOUT_S:
-            try:
-                resp = client.get(
-                    QR_CHECK_URL,
-                    params={
-                        "entry": QR_ENTRY,
-                        "source": QR_SOURCE,
-                        "url": QR_REDIRECT_URL,
-                        "qrid": qrid,
-                        "rid": "",
-                        "ver": QR_VERSION,
-                    },
-                )
-                resp.raise_for_status()
-                check_data = resp.json()
-                retcode = check_data.get("retcode")
-                msg = check_data.get("msg", "")
-
-                if retcode != last_status:
-                    logger.info("QR check: retcode=%s msg=%s", retcode, msg)
-                    last_status = retcode
-
-                if retcode == RETCODE_SUCCESS:
-                    print("  ✅ 扫码成功！正在完成登录...")
-
-                    # Step 5: Follow crossdomain URL to get session cookies
-                    cross_url = check_data.get("data", {}).get("url", "")
-                    alt = check_data.get("data", {}).get("alt", "")
-
-                    cookies = {}
-
-                    # Collect cookies from passport domain
-                    for name, value in client.cookies.items():
-                        cookies[name] = value
-
-                    if cross_url:
-                        logger.info("Following crossdomain URL...")
-                        try:
-                            # Use a separate client for cross-domain requests
-                            with httpx.Client(
-                                follow_redirects=True,
-                                timeout=httpx.Timeout(30),
-                                headers={"User-Agent": PASSPORT_HEADERS["User-Agent"]},
-                            ) as cross_client:
-                                cross_resp = cross_client.get(cross_url)
-                                for name, value in cross_resp.cookies.items():
-                                    cookies[name] = value
-                                for name, value in cross_client.cookies.items():
-                                    cookies[name] = value
-                        except Exception as e:
-                            logger.warning("Cross-domain follow failed: %s", e)
-
-                    if alt:
-                        # alt parameter may need to be exchanged for final cookies
-                        try:
-                            alt_url = f"https://login.sina.com.cn/sso/login.php?entry=miniblog&alt={alt}&returntype=TEXT"
-                            with httpx.Client(
-                                follow_redirects=True,
-                                timeout=httpx.Timeout(30),
-                                headers={"User-Agent": PASSPORT_HEADERS["User-Agent"]},
-                            ) as alt_client:
-                                alt_resp = alt_client.get(alt_url)
-                                for name, value in alt_resp.cookies.items():
-                                    cookies[name] = value
-                                for name, value in alt_client.cookies.items():
-                                    cookies[name] = value
-                        except Exception as e:
-                            logger.warning("Alt token exchange failed: %s", e)
-
-                    if not cookies:
-                        raise RuntimeError("Login succeeded but no cookies were obtained")
-
-                    credential = Credential(cookies=cookies)
-                    save_credential(credential)
-                    print("  ✅ 登录成功！凭证已保存到", CREDENTIAL_FILE)
-                    return credential
-
-                elif retcode == RETCODE_QR_NOT_SCANNED:
-                    # Still waiting for scan
-                    pass
-
-                else:
-                    # Could be scanned/confirmed/expired
-                    if "已扫" in msg or "扫描" in msg:
-                        print("  📲 已扫码，请在手机上确认登录...")
-                    elif "过期" in msg or "expired" in msg.lower():
-                        raise QRExpiredError()
-
-            except httpx.TimeoutException:
-                logger.debug("QR check timeout, retrying...")
-            except QRExpiredError:
-                raise
-
-            time.sleep(POLL_INTERVAL_S)
-
-        raise QRExpiredError()
+        cred = _qr_poll_and_finalize(client, session["qrid"], on_status=_on_status)
+        click.echo("登录成功，凭证已保存")
+        return cred
 
 
 # ── Unified get_credential ──────────────────────────────────────────

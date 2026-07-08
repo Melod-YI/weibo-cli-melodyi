@@ -35,7 +35,7 @@ A CLI for Weibo (微博) — search, browse hot topics, read timelines, and expl
 - Followers: view a user's follower list
 - Structured output: export any data as JSON or YAML for scripting and AI agent integration
 
-> **AI Agent Tip:** Prefer `--yaml` for structured output unless strict JSON is required. Non-TTY stdout defaults to YAML automatically. Use `--count` to limit results.
+> **AI Agent Tip:** Default output is plain text (agent-friendly, low token). Use `--json` when you need strict JSON, `--yaml` otherwise. Use `--count` to limit results.
 
 **Auth & Anti-Detection:**
 - Cookie auth: auto-extract from Arc/Chrome/Edge/Firefox/Brave/Chromium/Opera/Vivaldi
@@ -146,6 +146,20 @@ weibo-cli uses this auth priority:
 2. **Browser cookies** (recommended) — auto-extract from Arc/Chrome/Edge/Firefox/Brave/Chromium/Opera/Vivaldi/Safari/LibreWolf
 3. **QR code login** — terminal QR code, scan with Weibo App
 
+**Two-phase QR login (for agents):**
+
+```bash
+# 1. Generate QR image (non-interactive)
+weibo login qr-start --png /tmp/qr.png
+# → writes PNG + session file, prints image/qrid/session/qr_expires_in
+
+# 2. Send /tmp/qr.png to user, ask them to scan with Weibo App
+
+# 3. Complete login
+weibo login qr-done
+# → polls scan result, saves credential, clears session
+```
+
 Browser extraction is recommended — it forwards ALL Weibo cookies and is closest to normal browser traffic.
 
 Cookie TTL is **7 days** by default. After expiry, the client automatically attempts browser re-extraction.
@@ -168,9 +182,9 @@ Cookie TTL is **7 days** by default. After expiry, the client automatically atte
 
 ### Output Modes
 
-- Default **Rich table** for interactive terminal reading
-- `--json` for scripts and agent pipelines
-- `--yaml` for structured output (auto-detected when stdout is not a TTY)
+- Default **plain text** for agent-friendly, token-efficient output (TTY and non-TTY alike)
+- `--json` for strict JSON
+- `--yaml` for YAML structured output
 
 ### Development
 
@@ -251,7 +265,7 @@ git clone git@github.com:jackwener/weibo-cli.git .agents/skills/weibo-cli
 - 👥 粉丝列表：查看用户的粉丝列表
 - 📊 结构化输出：支持 JSON 和 YAML，便于脚本和 AI Agent 集成
 
-> **AI Agent 提示：** 需要结构化输出时优先使用 `--yaml`，除非下游必须是 JSON。stdout 不是 TTY 时默认输出 YAML。
+> **AI Agent 提示：** 默认输出为纯文本（agent 友好、省 token）。需要严格 JSON 时用 `--json`，否则可用 `--yaml`。用 `--count` 限制条数。
 
 **认证与反风控:**
 - Cookie 认证：支持 Arc/Chrome/Edge/Firefox/Brave 等 10+ 浏览器自动提取
@@ -290,6 +304,8 @@ uv sync
 # 认证
 weibo login                            # 从浏览器提取 Cookie / 二维码扫码
 weibo login --qrcode                   # 直接二维码扫码登录
+weibo login qr-start --png /tmp/qr.png   # 生成二维码图片（非交互，agent 用）
+weibo login qr-done                       # 完成二维码登录
 weibo login --cookie-source chrome     # 指定浏览器提取
 weibo logout                           # 清除已保存凭证
 weibo status                           # 检查登录状态

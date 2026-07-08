@@ -49,12 +49,18 @@ weibo login --qrcode          # QR code login directly (skip browser cookies)
 weibo status
 ```
 
-**Method B: QR code login**
+**Method B: Two-phase QR login (agent-friendly)**
 
 ```bash
-weibo login
-# → Renders QR in terminal using Unicode half-blocks
-# → Scan with Weibo App (我的 → 扫一扫) → confirm
+# 1. Generate QR image (non-interactive)
+weibo login qr-start --png /tmp/qr.png
+# stdout: image: /tmp/qr.png / qrid: ... / session: ... / qr_expires_in: 240
+
+# 2. Send /tmp/qr.png to the user; ask them to scan with Weibo App (我的 → 扫一扫)
+
+# 3. After user scanned, complete login
+weibo login qr-done
+# stdout: status: success / credential saved: ...
 ```
 
 ### Step 2: Handle common auth issues
@@ -67,11 +73,13 @@ weibo login
 
 ## Output Format
 
-### Default: Rich table (human-readable)
+### Default: plain text (agent-friendly)
 
 ```bash
-weibo hot                              # Pretty table output
+weibo hot                              # Plain text output, low token
 ```
+
+Non-TTY and TTY both default to plain text. Use `--json`/`--yaml` for structured output.
 
 ### JSON / YAML: structured output
 
@@ -80,8 +88,6 @@ weibo hot --json                       # JSON to stdout
 weibo hot --yaml                       # YAML output
 weibo hot --json | jq '.realtime[:3]'  # Filter with jq
 ```
-
-Non-TTY stdout defaults to YAML automatically.
 
 ## Command Reference
 
@@ -108,6 +114,8 @@ Non-TTY stdout defaults to YAML automatically.
 |---------|-------------|
 | `weibo login` | Extract cookies from browser / QR login |
 | `weibo login --qrcode` | QR code login directly (skip browser) |
+| `weibo login qr-start --png <path>` | Generate QR login image (non-interactive, for agents) |
+| `weibo login qr-done` | Complete QR login (poll scan result, save credential) |
 | `weibo login --cookie-source <browser>` | Extract from specific browser |
 | `weibo logout` | Clear saved credentials |
 | `weibo status` | Check authentication status |

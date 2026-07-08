@@ -128,7 +128,7 @@ def reposts(mblogid, count, page, as_json, as_yaml):
 @click.option("--count", "-n", default=20, help="条数 (1-50)")
 @structured_output_options
 def home(count, as_json, as_yaml):
-    """查看关注者 Feed (weibo home) 🏠"""
+    """查看关注者 Feed (weibo home)"""
     cred = require_auth()
 
     def _render(data):

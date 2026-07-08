@@ -23,7 +23,7 @@ from .commands import auth, personal, search
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging (show request URLs, timing)")
 @click.pass_context
 def cli(ctx, verbose: bool) -> None:
-    """Weibo CLI — 在终端使用微博 🐦"""
+    """Weibo CLI — 在终端使用微博"""
     ctx.ensure_object(dict)
     if verbose:
         logging.basicConfig(level=logging.INFO, format="%(name)s %(message)s")

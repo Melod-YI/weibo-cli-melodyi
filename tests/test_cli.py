@@ -242,3 +242,25 @@ def test_qr_done_no_session_exits(monkeypatch, tmp_path):
     result = runner.invoke(cli, ["login", "qr-done"])
     assert result.exit_code == 1
     assert "未找到 QR 会话" in (result.output + (result.stderr or ""))
+
+
+def test_qr_done_runtime_error_clears_session(monkeypatch, tmp_path):
+    """qr-done _qr_poll_and_finalize 抛 RuntimeError → 删 session + exit 1。"""
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: {
+        "qrid": "q", "csrf_token": "c", "cookies": {"SUB": "x"},
+        "scan_url": "s", "created_at": __import__("time").time(),
+    })
+    def _raise(*a, **kw):
+        raise RuntimeError("Login succeeded but no cookies were obtained")
+    monkeypatch.setattr(auth_core, "_qr_poll_and_finalize", _raise)
+    deleted = {"called": False}
+    monkeypatch.setattr(auth_core, "clear_qr_session", lambda path=None: deleted.__setitem__("called", True))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 1
+    assert deleted["called"] is True
+    assert "Login succeeded but no cookies" in (result.output + (result.stderr or ""))

@@ -379,6 +379,20 @@ class TestQrPollAndFinalize:
         assert cred.cookies["SUB"] == "fromalt"
         client.close()
 
+    def test_success_saves_even_if_cross_alt_empty(self, tmp_path, monkeypatch):
+        """cross/alt 都返回空，但 passport cookies 非空 → 仍保存凭证（保留原语义）。"""
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json")
+        monkeypatch.setattr("weibo_cli.auth.POLL_INTERVAL_S", 0)
+        monkeypatch.setattr("weibo_cli.auth._exchange_crossdomain", lambda url, alt: {})  # cross/alt 都空
+        states = [{"retcode": RETCODE_SUCCESS, "data": {"url": "u", "alt": "a"}}]
+        client = self._client_with_states(states, monkeypatch)
+        # _client_with_states 已在 client.cookies 设了 X-CSRF-TOKEN
+        cred = _qr_poll_and_finalize(client, "qrid")
+        assert cred.cookies.get("X-CSRF-TOKEN") == "csrf"
+        assert (tmp_path / "credential.json").exists()
+        client.close()
+
 
 class TestExchangeCrossdomain:
     """Direct tests for _exchange_crossdomain fallback logic."""

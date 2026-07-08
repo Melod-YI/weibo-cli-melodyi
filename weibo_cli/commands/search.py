@@ -12,7 +12,7 @@ from .renderers import render_comment_list, render_weibo_list
 @click.option("--count", "-n", default=50, help="条数 (默认50)")
 @structured_output_options
 def hot(count, as_json, as_yaml):
-    """查看微博热搜榜 🔥"""
+    """查看微博热搜榜"""
     from ..auth import get_credential
 
     cred = get_credential()
@@ -39,7 +39,7 @@ def hot(count, as_json, as_yaml):
 @click.option("--count", "-n", default=10, help="条数 (1-20)")
 @structured_output_options
 def feed(count, as_json, as_yaml):
-    """查看热门微博 Feed 📰"""
+    """查看热门微博 Feed"""
     from ..auth import get_credential
 
     cred = get_credential()
@@ -115,7 +115,7 @@ def comments(mblogid, count, as_json, as_yaml):
 @click.option("--count", "-n", default=16, help="条数 (默认16)")
 @structured_output_options
 def trending(count, as_json, as_yaml):
-    """查看实时搜索趋势 📈"""
+    """查看实时搜索趋势"""
     from ..auth import get_credential
 
     cred = get_credential()
@@ -142,7 +142,7 @@ def trending(count, as_json, as_yaml):
 @click.option("--page", "-p", default=1, help="页码")
 @structured_output_options
 def search(keyword, count, page, as_json, as_yaml):
-    """搜索微博 (weibo search <关键词>) 🔍"""
+    """搜索微博 (weibo search <关键词>)"""
     from ..auth import get_credential
 
     cred = get_credential()

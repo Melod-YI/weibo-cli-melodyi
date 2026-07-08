@@ -124,3 +124,14 @@ def test_status_command_plain(monkeypatch):
     assert result.exit_code == 0
     assert "authenticated" in result.output
     assert "cookies=2" in result.output
+
+
+def test_me_uid_missing_exits_nonzero(monkeypatch):
+    """me 拿不到 uid 时 stderr 报错并 exit_code=1。"""
+    _stub_client(monkeypatch, {"get_current_uid": None})
+    runner = CliRunner()
+    result = runner.invoke(cli, ["me"])
+    assert result.exit_code == 1
+    # Click 8.4 默认分离 stderr；两处都查以兼容
+    combined = (result.output or "") + (result.stderr if result.stderr is not None else "")
+    assert "无法获取当前 uid" in combined

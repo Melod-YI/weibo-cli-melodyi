@@ -7,13 +7,10 @@ import re
 from typing import Any
 
 import click
-from rich.console import Console
 
 from ..auth import Credential, get_credential
 from ..client import WeiboClient
 from ..exceptions import AuthRequiredError, WeiboApiError, SessionExpiredError, error_code_for_exception
-
-console = Console()
 
 
 # ── Shared formatters ───────────────────────────────────────────────

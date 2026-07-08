@@ -7,7 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from click.testing import CliRunner
 
+from weibo_cli.cli import cli
 from weibo_cli.commands._common import format_count, strip_html
 from weibo_cli.exceptions import SessionExpiredError, WeiboApiError
 
@@ -178,10 +180,6 @@ class TestSearchWeiboAPI:
 
 
 # ── handle_command routing tests ──────────────────────────────────────
-
-
-from click.testing import CliRunner
-from weibo_cli.cli import cli
 
 
 def test_non_tty_defaults_to_plain_not_yaml(monkeypatch):

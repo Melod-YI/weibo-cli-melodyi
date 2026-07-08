@@ -118,3 +118,28 @@ def test_json_option_available(cmd):
     runner = CliRunner()
     result = runner.invoke(cli, [cmd, "--help"])
     assert "--json" in result.output
+
+
+# ── login group / qr subcommands ────────────────────────────────────
+
+
+def test_qr_subcommands_registered():
+    """login group 下有 qr-start / qr-done 子命令。"""
+    runner = CliRunner()
+    for sub in ["qr-start", "qr-done"]:
+        result = runner.invoke(cli, ["login", sub, "--help"])
+        assert result.exit_code == 0, f"login {sub} --help failed: {result.output}"
+
+
+def test_qr_start_does_not_trigger_default_login(monkeypatch):
+    """qr-start 不能误触发 group 回调的默认登录流程。"""
+    called = {"get_credential": 0, "qr_login": 0}
+    # get_credential 与 qr_login 均在 login 函数体内 from ..auth import，需 patch 源模块
+    import weibo_cli.auth as auth_core
+    monkeypatch.setattr(auth_core, "get_credential", lambda: called.__setitem__("get_credential", called["get_credential"] + 1) or None)
+    monkeypatch.setattr(auth_core, "qr_login", lambda: called.__setitem__("qr_login", called["qr_login"] + 1) or None)
+    # qr-start 不带 --png 应因参数缺失而非 0 退出，但不应调用 get_credential/qr_login
+    runner = CliRunner()
+    runner.invoke(cli, ["login", "qr-start"])
+    assert called["get_credential"] == 0
+    assert called["qr_login"] == 0

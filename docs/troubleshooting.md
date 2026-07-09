@@ -166,7 +166,7 @@ $ weibo search "科技"
 
 ```bash
 # 单测
-uv run pytest tests/                  # 130 passed（1 个预先存在的 Windows 权限测试失败，与本修复无关）
+uv run pytest tests/                  # 163 passed, 1 skipped（Windows 权限测试在 win32 跳过）
 
 # 端到端
 weibo -v home --count 3               # 返回真实关注 Feed
@@ -194,6 +194,9 @@ with httpx.Client(base_url=BASE_URL, headers=dict(HEADERS), cookies=cookies,
 
 - **`weibo search` 暂不支持**：移动端 `m.weibo.cn` 会话未由 QR 登录建立，详见上文
   "问题四"。待选定修复方向（s.weibo.cn HTML 解析 / 补建 m.weibo.cn 会话）后实现。
-- `tests/test_auth.py::test_file_permissions` 在 Windows 上失败：断言 `chmod 0o600` 生效，
-  但 Windows 不支持 Unix 权限位（实际 `0o666`）。与本次修复无关，建议后续单独处理
- （例如对该测试加 `pytest.skip(on_windows)` 或改用跨平台断言）。
+
+## 后续修复记录
+
+- **`tests/test_auth.py::test_file_permissions` Windows 失败**：已修复（提交 `5070f24`），
+  对该用例加 `@pytest.mark.skipif(sys.platform == "win32")`，因为 Windows 上 `chmod 0o600`
+  是 no-op（实际权限位 `0o666`），断言在 win32 直接跳过。

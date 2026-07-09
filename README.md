@@ -6,6 +6,8 @@
 
 A CLI for Weibo (微博) — search, browse hot topics, read timelines, and explore user profiles from the terminal 🐦
 
+> **This is an agent-first fork.** The CLI is designed to be driven by AI agents, not humans typing at a terminal: default output is **plain text** (low token, easy to parse), errors go to **stderr** (so stdout stays clean data), and login has a **non-blocking two-phase QR flow** (`qr-start` / `qr-done`) so an agent can hand the QR image to a user without blocking. Use `--json` / `--yaml` when you need structured output, `--count` to cap result volume, and `2>/dev/null` to drop logs from stdout.
+
 [English](#english) | [中文](#中文)
 
 ## More Tools
@@ -24,7 +26,7 @@ A CLI for Weibo (微博) — search, browse hot topics, read timelines, and expl
 - Hot search: browse real-time trending topics and hashtags
 - Hot timeline: browse the trending feed
 - Home feed: browse your following timeline
-- Search: find weibos by keyword
+- Search: find weibos by keyword *(currently limited — see [Notes](#notes))*
 - Search trends: real-time trending sidebar data
 - Weibo detail: view a weibo with full text, media, and stats
 - Comments: read comments on any weibo
@@ -38,8 +40,9 @@ A CLI for Weibo (微博) — search, browse hot topics, read timelines, and expl
 > **AI Agent Tip:** Default output is plain text (agent-friendly, low token). Use `--json` when you need strict JSON, `--yaml` otherwise. Use `--count` to limit results.
 
 **Auth & Anti-Detection:**
-- Cookie auth: auto-extract from Arc/Chrome/Edge/Firefox/Brave/Chromium/Opera/Vivaldi
-- QR code login: terminal-rendered QR code for Weibo App scan
+- Two-phase QR login (agent-friendly, non-blocking): `qr-start` generates a PNG + session file, `qr-done` polls to completion — no terminal blocking
+- Cookie auth: auto-extract from Arc/Chrome/Edge/Firefox/Brave/Chromium/Opera/Vivaldi via `rookiepy` (Chrome v20 App-Bound Encryption may be undecryptable on newer Chrome; Firefox/Edge usually work)
+- Interactive QR: `weibo login --qrcode` renders a QR in the terminal for human scan
 - Credential persistence: auto-save to `~/.config/weibo-cli/credential.json` with 7-day TTL
 - Anti-detection: Chrome 145 User-Agent, Gaussian jitter, exponential backoff
 - Session auto-refresh: stale credentials trigger browser cookie re-extraction
@@ -77,9 +80,6 @@ weibo login
 # Browse hot search
 weibo hot
 
-# Search weibos by keyword
-weibo search "科技"
-
 # View hot timeline
 weibo feed
 
@@ -107,7 +107,7 @@ weibo trending --count 10              # Limit results
 weibo trending --yaml                  # YAML output
 
 # ─── Search ─────────────────────────────────────
-weibo search <keyword>                 # Search weibos by keyword
+weibo search <keyword>                 # Search weibos by keyword (needs m.weibo.cn session, see Notes)
 weibo search "科技" --count 5            # Limit results
 weibo search "科技" --page 2 --json     # Paginate + JSON output
 
@@ -143,10 +143,10 @@ weibo followers <uid>                  # User's follower list
 weibo-cli uses this auth priority:
 
 1. **Saved credentials** — loads from `~/.config/weibo-cli/credential.json`
-2. **Browser cookies** (recommended) — auto-extract from Arc/Chrome/Edge/Firefox/Brave/Chromium/Opera/Vivaldi/Safari/LibreWolf
-3. **QR code login** — terminal QR code, scan with Weibo App
+2. **Browser cookies** — auto-extract from Arc/Chrome/Edge/Firefox/Brave/Chromium/Opera/Vivaldi/Safari/LibreWolf via `rookiepy`
+3. **QR code login** — terminal QR code (`--qrcode`) or two-phase (`qr-start`/`qr-done`)
 
-**Two-phase QR login (for agents):**
+**For agents, two-phase QR is the recommended path** — it is non-blocking, has no browser dependency, and works reliably across machines (Chrome's v20 App-Bound Encryption can defeat `rookiepy` on newer Chrome):
 
 ```bash
 # 1. Generate QR image (non-interactive)
@@ -160,7 +160,7 @@ weibo login qr-done
 # → polls scan result, saves credential, clears session
 ```
 
-Browser extraction is recommended — it forwards ALL Weibo cookies and is closest to normal browser traffic.
+Browser extraction is a fallback for interactive/human setups — it forwards ALL Weibo cookies and is closest to normal browser traffic, but depends on the local browser's cookie being decryptable.
 
 Cookie TTL is **7 days** by default. After expiry, the client automatically attempts browser re-extraction.
 
@@ -168,23 +168,25 @@ Cookie TTL is **7 days** by default. After expiry, the client automatically atte
 
 - `⚠️ 未登录` — Run `weibo login` to authenticate
 - `会话已过期` — Cookie expired, run `weibo logout && weibo login`
-- `Unable to get key for cookie decryption` (macOS Keychain):
-  - **SSH sessions**: `security unlock-keychain ~/Library/Keychains/login.keychain-db`
-  - **Local terminal**: Open **Keychain Access** → search **"Chrome Safe Storage"** → **Access Control** → add Terminal → **Save**
+- `Unable to get key for cookie decryption` / `decrypt_encrypted_value failed` (Chrome): Chrome v20 App-Bound Encryption (Chrome 133+) may be undecryptable by `rookiepy`. Workaround: use `weibo login --qrcode` (or `qr-start`/`qr-done`), or extract from Firefox/Edge instead.
+- `weibo search` returns login/redirect instead of results — keyword search uses `m.weibo.cn`, whose session is **not** established by QR login. See [Notes](#notes).
 - Requests are slow — intentional Gaussian jitter delay (~1s) to avoid triggering Weibo's risk control
 
 ### Best Practices (Avoiding Bans)
 
 - **Keep request volumes low** — use `--count 10` instead of `--count 100`
 - **Don't run too frequently** — the built-in rate limiter adds randomized delays
-- **Use browser cookie extraction** — provides full cookie fingerprint
 - Cookie values are stored locally and never uploaded
 
 ### Output Modes
 
-- Default **plain text** for agent-friendly, token-efficient output (TTY and non-TTY alike)
+- Default **plain text** for agent-friendly, token-efficient output (TTY and non-TTY alike); errors go to stderr
 - `--json` for strict JSON
 - `--yaml` for YAML structured output
+
+### Notes
+
+- **`weibo search` is currently limited.** Keyword search hits `m.weibo.cn/api/container/getIndex`, but QR login only establishes a `weibo.com` session — so `weibo search` will hit a login redirect after QR login. It works only when browser cookie extraction provides a valid `m.weibo.cn` session. This is a known issue (see [`docs/troubleshooting.md`](./docs/troubleshooting.md)), pending a fix (build `m.weibo.cn` session during login, or parse `s.weibo.cn` HTML).
 
 ### Development
 
@@ -205,14 +207,14 @@ uv run pytest tests/ -v -m smoke
 ```text
 weibo_cli/
 ├── __init__.py
-├── cli.py             # Click entry point (16 commands)
-├── client.py          # WeiboClient (17 API methods, rate-limit, retry)
-├── auth.py            # QR login + browser-cookie3 + credential persistence
-├── constants.py       # API endpoints, headers, Chrome 145 UA
+├── cli.py             # Click entry point (16 top-level commands; login is a group)
+├── client.py          # WeiboClient (16 API methods, rate-limit, retry)
+├── auth.py            # QR login (interactive + two-phase) + rookiepy browser extraction + credential persistence
+├── constants.py       # API endpoints, headers, Chrome 145 UA, QR session constants
 ├── exceptions.py      # WeiboApiError hierarchy (6 error types)
 └── commands/
     ├── _common.py     # structured_output_options, handle_command, strip_html, format_count
-    ├── auth.py        # login/logout/status/me
+    ├── auth.py        # login(group: qr-start/qr-done)/logout/status/me
     ├── search.py      # hot/feed/detail/comments/trending/search
     └── personal.py    # profile/weibos/following/followers/reposts/home
 ```
@@ -254,7 +256,7 @@ git clone git@github.com:jackwener/weibo-cli.git .agents/skills/weibo-cli
 - 🔥 热搜：实时热门话题和标签
 - 📰 热门 Feed：热门时间线
 - 🏠 关注者 Feed：关注用户的时间线
-- 🔍 搜索：按关键词搜索微博
+- 🔍 搜索：按关键词搜索微博（*当前受限，见下方「注意事项」*）
 - 📈 搜索趋势：实时搜索趋势侧边栏
 - 📝 微博详情：查看完整正文、媒体和统计数据
 - 💬 评论：查看微博评论
@@ -268,8 +270,9 @@ git clone git@github.com:jackwener/weibo-cli.git .agents/skills/weibo-cli
 > **AI Agent 提示：** 默认输出为纯文本（agent 友好、省 token）。需要严格 JSON 时用 `--json`，否则可用 `--yaml`。用 `--count` 限制条数。
 
 **认证与反风控:**
-- Cookie 认证：支持 Arc/Chrome/Edge/Firefox/Brave 等 10+ 浏览器自动提取
-- 二维码登录：终端渲染二维码，用微博 APP 扫码
+- 两段式 QR 登录（agent 友好、非阻塞）：`qr-start` 生成图片+会话文件，`qr-done` 轮询完成，不阻塞终端
+- Cookie 认证：经 `rookiepy` 从 Arc/Chrome/Edge/Firefox/Brave 等浏览器自动提取（Chrome v20 App-Bound Encryption 可能解不开，Firefox/Edge 通常可用）
+- 交互式二维码：`weibo login --qrcode` 终端渲染二维码供人扫码
 - 凭证持久化：自动保存到 `~/.config/weibo-cli/credential.json`，7 天 TTL
 - 反检测：Chrome 145 User-Agent、高斯抖动延迟、指数退避重试
 - 会话自动刷新：过期凭证自动触发浏览器 Cookie 重提取
@@ -343,7 +346,13 @@ weibo followers 1699432410             # 用户粉丝列表
 
 - `⚠️ 未登录` — 执行 `weibo login` 认证
 - `会话已过期` — Cookie 过期，执行 `weibo logout && weibo login`
+- `Unable to get key for cookie decryption` / `decrypt_encrypted_value failed`（Chrome）：Chrome 133+ 的 v20 App-Bound Encryption 可能被 `rookiepy` 解不开。改用 `weibo login --qrcode`（或 `qr-start`/`qr-done`），或从 Firefox/Edge 提取。
+- `weibo search` 返回登录重定向而非结果 — 关键词搜索走 `m.weibo.cn`，其会话不由 QR 登录建立。见下方「注意事项」。
 - 请求较慢是正常的 — 内置高斯随机延迟（~1s）是为了模拟人类浏览行为，避免触发风控
+
+### 注意事项
+
+- **`weibo search` 当前受限。** 关键词搜索走 `m.weibo.cn/api/container/getIndex`，但 QR 登录只建立 `weibo.com` 会话，因此 QR 登录后 `weibo search` 会命中登录重定向。仅当浏览器 Cookie 提取提供了有效的 `m.weibo.cn` 会话时才可用。这是已知问题（见 [`docs/troubleshooting.md`](./docs/troubleshooting.md)），待修复（登录时补建 `m.weibo.cn` 会话，或改走 `s.weibo.cn` HTML 解析）。
 
 ### 作为 AI Agent Skill 使用
 

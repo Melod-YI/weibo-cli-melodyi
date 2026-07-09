@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import sys
 import time
-from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -158,74 +157,91 @@ class TestCredentialPersistence:
 # ── Browser cookie extraction ───────────────────────────────────────
 
 
+def _rk_cookie(name: str, value: str, domain: str) -> dict:
+    """Build a rookiepy-shaped cookie dict (real key set: domain/name/value/...)."""
+    return {"name": name, "value": value, "domain": domain, "path": "/",
+            "secure": True, "expires": None, "http_only": False}
+
+
 class TestBrowserExtraction:
     def test_extraction_success(self, monkeypatch, tmp_path):
         monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
         monkeypatch.setattr("weibo_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json")
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = json.dumps({"browser": "Chrome", "cookies": {"SUB": "extracted"}})
-
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr("rookiepy.chrome", lambda domains=None: [
+            _rk_cookie("SUB", "extracted", ".weibo.com"),
+            _rk_cookie("SUBP", "p", ".weibo.com"),
+        ])
         cred = extract_browser_credential()
         assert cred is not None
         assert cred.cookies["SUB"] == "extracted"
+        assert cred.cookies["SUBP"] == "p"
 
-    def test_extraction_no_cookies(self, monkeypatch):
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = json.dumps({"error": "no_cookies"})
-
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: mock_result)
-        assert extract_browser_credential() is None
-
-    def test_extraction_not_installed(self, monkeypatch):
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = json.dumps({"error": "not_installed"})
-
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: mock_result)
-        assert extract_browser_credential() is None
-
-    def test_extraction_subprocess_failure(self, monkeypatch):
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = "error"
-
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: mock_result)
-        assert extract_browser_credential() is None
-
-    def test_extraction_timeout(self, monkeypatch):
-        import subprocess
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired("cmd", 15)))
-        assert extract_browser_credential() is None
-
-    def test_extraction_invalid_json(self, monkeypatch):
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "not json"
-
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: mock_result)
-        assert extract_browser_credential() is None
-
-    def test_extraction_with_cookie_source(self, monkeypatch, tmp_path):
+    def test_extraction_filters_non_weibo_domains(self, monkeypatch, tmp_path):
         monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
         monkeypatch.setattr("weibo_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json")
-
-        captured_cmd = {}
-
-        def fake_run(cmd, **kw):
-            captured_cmd["args"] = cmd
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = json.dumps({"browser": "Firefox", "cookies": {"SUB": "fx"}})
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        cred = extract_browser_credential(cookie_source="Firefox")
+        monkeypatch.setattr("rookiepy.chrome", lambda domains=None: [
+            _rk_cookie("id", "google-val", ".google.com"),
+            _rk_cookie("SUB", "wb", ".weibo.com"),
+        ])
+        cred = extract_browser_credential()
         assert cred is not None
-        assert "Firefox" in captured_cmd["args"]
+        assert cred.cookies == {"SUB": "wb"}
+
+    def test_extraction_no_weibo_cookies(self, monkeypatch):
+        monkeypatch.setattr("rookiepy.chrome", lambda domains=None: [
+            _rk_cookie("id", "x", ".google.com"),
+        ])
+        errors: dict[str, str] = {}
+        cred = extract_browser_credential(cookie_source="chrome", errors_out=errors)
+        assert cred is None
+        assert "Chrome" in errors
+
+    def test_extraction_surfaces_loader_error(self, monkeypatch):
+        # rookiepy raises RuntimeError when Chrome v130+ cookies need admin.
+        # The error must be surfaced via errors_out, not swallowed.
+        def boom(domains=None):
+            raise RuntimeError("can be decrypted only when running as admin")
+        monkeypatch.setattr("rookiepy.chrome", boom)
+        errors: dict[str, str] = {}
+        cred = extract_browser_credential(cookie_source="chrome", errors_out=errors)
+        assert cred is None
+        assert "RuntimeError" in errors["Chrome"]
+        assert "admin" in errors["Chrome"]
+
+    def test_extraction_cookie_source_firefox(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json")
+        called = {}
+
+        def fake_ff(domains=None):
+            called["domains"] = domains
+            return [_rk_cookie("SUB", "fx", ".weibo.com")]
+
+        monkeypatch.setattr("rookiepy.firefox", fake_ff)
+        cred = extract_browser_credential(cookie_source="firefox")
+        assert cred is not None
+        assert cred.cookies["SUB"] == "fx"
+        assert "weibo.com" in called["domains"]
+
+    def test_extraction_unsupported_browser(self, monkeypatch):
+        errors: dict[str, str] = {}
+        cred = extract_browser_credential(cookie_source="netscape", errors_out=errors)
+        assert cred is None
+        assert "netscape" in errors
+
+    def test_extraction_auto_falls_through_to_next_browser(self, monkeypatch, tmp_path):
+        # Auto mode iterates browsers; Chrome raises (needs admin), Firefox succeeds.
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json")
+        monkeypatch.setattr("rookiepy.chrome", lambda domains=None: (_ for _ in ()).throw(RuntimeError("admin required")))
+        monkeypatch.setattr("rookiepy.edge", lambda domains=None: (_ for _ in ()).throw(RuntimeError("nope")))
+        monkeypatch.setattr("rookiepy.firefox", lambda domains=None: [_rk_cookie("SUB", "ff", ".weibo.com")])
+        errors: dict[str, str] = {}
+        cred = extract_browser_credential(errors_out=errors)
+        assert cred is not None
+        assert cred.cookies["SUB"] == "ff"
+        assert "Chrome" in errors
+        assert "Edge" in errors
 
 
 # ── get_credential chain ────────────────────────────────────────────

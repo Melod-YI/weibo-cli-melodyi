@@ -31,12 +31,19 @@ def login(ctx, qrcode, cookie_source):
         return
 
     if cookie_source:
-        cred = extract_browser_credential(cookie_source=cookie_source)
+        errors: dict[str, str] = {}
+        cred = extract_browser_credential(cookie_source=cookie_source, errors_out=errors)
         if cred:
             click.echo(f"已从 {cookie_source} 提取 Cookie 并登录")
         else:
             click.echo(f"未在 {cookie_source} 找到有效 Cookie", err=True)
-            click.echo("提示: 使用 weibo login --qrcode 或 weibo login qr-start 扫码登录", err=True)
+            for bname, reason in errors.items():
+                click.echo(f"  原因 ({bname}): {reason}", err=True)
+            click.echo(
+                "提示: 详见上方原因；Chrome v130+ cookie 需以管理员身份运行，"
+                "或使用 weibo login --qrcode / weibo login qr-start 扫码登录",
+                err=True,
+            )
         return
 
     cred = get_credential()

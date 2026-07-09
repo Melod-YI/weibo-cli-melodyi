@@ -2,7 +2,7 @@
 
 Strategy:
 1. Try loading saved credential from ~/.config/weibo-cli/credential.json
-2. Try extracting cookies from local browsers via browser-cookie3
+2. Try extracting cookies from local browsers via rookiepy
 3. Fallback: QR code login in terminal
 
 QR Login Flow (reverse-engineered from passport.weibo.com):
@@ -18,14 +18,13 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-import subprocess
-import sys
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import qrcode
+import rookiepy
 
 from .constants import (
     CONFIG_DIR,
@@ -129,89 +128,85 @@ def clear_credential() -> None:
 # ── Browser cookie extraction ───────────────────────────────────────
 
 
-def extract_browser_credential(cookie_source: str | None = None) -> Credential | None:
-    """Extract Weibo cookies from local browsers via browser-cookie3."""
-    extract_script = '''
-import json, sys
-try:
-    import browser_cookie3 as bc3
-except ImportError:
-    print(json.dumps({"error": "not_installed"}))
-    sys.exit(0)
+def _normalize_browser_name(name: str) -> str:
+    return name.lower().replace(" ", "").replace("_", "")
 
-target = sys.argv[1] if len(sys.argv) > 1 else None
 
-browsers = [
-    ("Chrome", bc3.chrome),
-    ("Firefox", bc3.firefox),
-    ("Edge", bc3.edge),
-    ("Brave", bc3.brave),
-    ("Chromium", bc3.chromium),
-    ("Opera", bc3.opera),
-    ("Vivaldi", bc3.vivaldi),
+# (display name, rookiepy function name). Iteration order matters for auto mode —
+# common browsers first.
+_BROWSER_LOADERS: list[tuple[str, str]] = [
+    ("Chrome", "chrome"),
+    ("Edge", "edge"),
+    ("Firefox", "firefox"),
+    ("Brave", "brave"),
+    ("Chromium", "chromium"),
+    ("Opera", "opera"),
+    ("Opera GX", "opera_gx"),
+    ("Vivaldi", "vivaldi"),
+    ("Arc", "arc"),
+    ("LibreWolf", "librewolf"),
+    ("Internet Explorer", "internet_explorer"),
 ]
 
-for name, attr in [("Arc", "arc"), ("Safari", "safari"), ("LibreWolf", "librewolf")]:
-    fn = getattr(bc3, attr, None)
-    if fn:
-        browsers.append((name, fn))
 
-if target:
-    target_lower = target.lower()
-    browsers = [(n, fn) for n, fn in browsers if n.lower() == target_lower]
-    if not browsers:
-        print(json.dumps({"error": f"unsupported_browser: {target}"}))
-        sys.exit(0)
+def extract_browser_credential(
+    cookie_source: str | None = None, *, errors_out: dict[str, str] | None = None
+) -> Credential | None:
+    """Extract Weibo cookies from local browsers via rookiepy (Rust backend).
 
-for name, loader in browsers:
-    try:
-        cj = loader(domain_name=".weibo.com")
-        cookies = {c.name: c.value for c in cj if "weibo.com" in (c.domain or "") or "sina.com" in (c.domain or "")}
-        if cookies:
-            print(json.dumps({"browser": name, "cookies": cookies}))
-            sys.exit(0)
-    except Exception:
-        pass
+    rookiepy decrypts Chrome v127+ App-Bound Encryption cookies, but on
+    Windows Chrome v130+ requires the calling process to run as admin —
+    otherwise it raises RuntimeError.
 
-print(json.dumps({"error": "no_cookies"}))
-'''
+    Per-browser failure reasons are written into *errors_out* (if given) and
+    logged at WARNING, so callers can surface them instead of a generic message.
+    """
+    logger.info("Extracting browser cookies (source=%s)", cookie_source or "auto")
 
-    try:
-        cmd = [sys.executable, "-c", extract_script]
-        if cookie_source:
-            cmd.append(cookie_source)
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-
-        if result.returncode != 0:
-            logger.debug("Cookie extraction subprocess failed: %s", result.stderr)
+    browsers = _BROWSER_LOADERS
+    if cookie_source:
+        target = _normalize_browser_name(cookie_source)
+        browsers = [
+            (n, fn) for n, fn in browsers
+            if _normalize_browser_name(n) == target or _normalize_browser_name(fn) == target
+        ]
+        if not browsers:
+            logger.warning("Unsupported browser: %s", cookie_source)
+            if errors_out is not None:
+                errors_out[cookie_source] = f"unsupported browser: {cookie_source}"
             return None
 
-        output = result.stdout.strip()
-        if not output:
-            return None
+    for name, fn_name in browsers:
+        loader = getattr(rookiepy, fn_name, None)
+        if loader is None:
+            continue
+        try:
+            raw = loader(domains=["weibo.com", "sina.com"])
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+            logger.warning("cookie extract failed [%s]: %s", name, reason)
+            if errors_out is not None:
+                errors_out[name] = reason
+            continue
 
-        data = json.loads(output)
-        if "error" in data:
-            if data["error"] == "not_installed":
-                logger.debug("browser-cookie3 not installed, skipping")
-            else:
-                logger.debug("No valid Weibo cookies found: %s", data["error"])
-            return None
+        cookies = {
+            c.get("name"): c.get("value")
+            for c in raw
+            if c.get("name") and c.get("value") is not None
+            and ("weibo.com" in (c.get("domain") or "") or "sina.com" in (c.get("domain") or ""))
+        }
+        if not cookies:
+            logger.debug("%s: no weibo cookies found", name)
+            if errors_out is not None:
+                errors_out[name] = "no weibo cookies found"
+            continue
 
-        cookies = data["cookies"]
-        browser_name = data["browser"]
-        logger.info("Found cookies in %s (%d cookies)", browser_name, len(cookies))
+        logger.info("Found cookies in %s (%d cookies)", name, len(cookies))
         cred = Credential(cookies=cookies)
         save_credential(cred)
         return cred
 
-    except subprocess.TimeoutExpired:
-        logger.warning("Cookie extraction timed out (browser may be running)")
-        return None
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.warning("Cookie extraction parse error: %s", e)
-        return None
+    return None
 
 
 # ── QR Code terminal rendering ──────────────────────────────────────

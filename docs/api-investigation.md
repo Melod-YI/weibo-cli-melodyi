@@ -115,7 +115,7 @@ region_name, retweeted_status, ok
 
 **问题**：网页带 `isGetLongText=true` 拉详情。我们未传该参数，对 `isLongText=true` 的长微博，`text` 可能是截断版（带"...全文"）。
 
-**建议修复**：`get_weibo_detail` 加 `locale=zh-CN&isGetLongText=true`；并暴露 `text_raw`（纯文本，无 HTML）、`favorited`、`attitudes_status`（是否已赞）等字段。
+**✅ 已修复（2026-07-11）**：`get_weibo_detail` 已加 `isGetLongText=true` 参数。实测长微博 `R8cuZ8uMW`：`text_raw` 从 155 字符（截断在「全高约1」）补全到 212 字符（完整结尾 hashtag）；与 `/ajax/statuses/longtext` 端点的 `longTextContent` 完全一致，故未引入该端点（YAGNI）。普通微博不受影响。
 
 ---
 

@@ -28,9 +28,10 @@ def render_weibo_card(s: dict, index: int, *, show_user: bool = True, max_text: 
         user = s.get("user", {})
         name = user.get("screen_name", "未知")
         verified = " ✓" if user.get("verified") else ""
-        lines.append(f"#{index}  @{name}{verified}  {created}")
+        uid = str(user.get("idstr", user.get("id", ""))) or ""
+        lines.append(f"#{index}  @{name}{verified}{f'  uid={uid}' if uid else ''}  {created}")
     else:
-        source = s.get("source", "")
+        source = strip_html(s.get("source", ""))
         lines.append(f"#{index}  {created}{f'  via {source}' if source else ''}")
 
     lines.append(f"    {text[:max_text]}")

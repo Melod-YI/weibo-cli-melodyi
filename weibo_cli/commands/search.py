@@ -65,8 +65,9 @@ def detail(mblogid, as_json, as_yaml):
         user = data.get("user", {})
         name = user.get("screen_name", "未知")
         verified = " ✓" if user.get("verified") else ""
+        uid = str(user.get("idstr", user.get("id", ""))) or ""
         text = strip_html(data.get("text_raw", data.get("text", "")))
-        source = data.get("source", "")
+        source = strip_html(data.get("source", ""))
         created = data.get("created_at", "")
         reposts = data.get("reposts_count", 0)
         comments_count = data.get("comments_count", 0)
@@ -74,6 +75,8 @@ def detail(mblogid, as_json, as_yaml):
         reads = data.get("reads_count", 0)
 
         lines = [f"@{name}{verified}"]
+        if uid:
+            lines.append(f"UID: {uid}")
         if user.get("verified_reason"):
             lines.append(f"  {user['verified_reason']}")
         lines.append(f"{created}{f'  via {source}' if source else ''}")

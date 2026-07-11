@@ -38,7 +38,7 @@ def test_render_weibo_card_plain(capture):
         "created_at": "2026-07-08 12:34",
         "reposts_count": 3, "comments_count": 12, "attitudes_count": 45,
         "mblogid": "Qw06Kd98p",
-        "user": {"screen_name": "张三", "verified": True},
+        "user": {"screen_name": "张三", "verified": True, "idstr": "1699432410"},
     }
     render_weibo_card(s, 1)
     _assert_no_box(capture)
@@ -47,6 +47,69 @@ def test_render_weibo_card_plain(capture):
     assert "评论12" in joined and "转发3" in joined and "赞45" in joined
     assert "Qw06Kd98p" in joined
     assert "✓" in joined  # 认证标记保留
+    assert "uid=1699432410" in joined  # 作者 uid 暴露，便于跳转 profile/weibos
+
+
+def test_render_weibo_card_uid_falls_back_to_id(capture):
+    """user 只有数字 id、无 idstr 时也应当打出 uid。"""
+    s = {
+        "text_raw": "x", "created_at": "t",
+        "user": {"screen_name": "李四", "id": 12345},
+    }
+    render_weibo_card(s, 1)
+    assert "uid=12345" in "\n".join(capture)
+
+
+def test_render_weibo_card_source_strips_html(capture):
+    """带链接的来源应去 HTML，只留链接文本（weibos 列表场景）。"""
+    s = {
+        "text_raw": "正文", "created_at": "Jul 11",
+        "source": '<a href="https://shop.sc.weibo.com/..." rel="nofollow">鹤屋通贩的小店</a>',
+    }
+    render_weibo_card(s, 1, show_user=False)
+    joined = "\n".join(capture)
+    assert "<a" not in joined  # HTML 标签被剥离
+    assert "鹤屋通贩的小店" in joined  # 链接文本保留
+    assert "via" in joined
+
+
+def test_detail_command_shows_uid_and_full_text(monkeypatch):
+    """detail 输出含作者 UID 行，且渲染完整 text_raw（非截断）。"""
+    long_weibo = {
+        "mblogid": "R8cuZ8uMW",
+        "isLongText": True,
+        "text_raw": "长微博全文，结尾是 hashtag\n#胜利女神nikke[超话]#",
+        "created_at": "Jul 11 17:00",
+        "reposts_count": 1, "comments_count": 2, "attitudes_count": 3, "reads_count": 100,
+        "source": "",
+        "user": {"screen_name": "某博主", "idstr": "9876543210", "verified": False},
+    }
+    _stub_client(monkeypatch, {"get_weibo_detail": long_weibo})
+    monkeypatch.setattr("weibo_cli.commands._common.require_auth", lambda: Credential(cookies={"SUB": "x"}))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["detail", "R8cuZ8uMW"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "@某博主" in out
+    assert "UID: 9876543210" in out  # 作者 uid 单独成行，方便复制跳转
+    assert "#胜利女神nikke[超话]#" in out  # 全文结尾，未被截断
+
+
+def test_detail_command_source_strips_html(monkeypatch):
+    """detail 的 via 来源带 HTML 时应剥离，只留链接文本。"""
+    weibo = {
+        "mblogid": "X1",
+        "text_raw": "正文",
+        "created_at": "Jul 11 17:00",
+        "source": '<a href="https://shop.sc.weibo.com/..." rel="nofollow">鹤屋通贩的小店</a>',
+        "user": {"screen_name": "某博主", "idstr": "1"},
+    }
+    _stub_client(monkeypatch, {"get_weibo_detail": weibo})
+    monkeypatch.setattr("weibo_cli.commands._common.require_auth", lambda: Credential(cookies={"SUB": "x"}))
+    result = CliRunner().invoke(cli, ["detail", "X1"])
+    assert result.exit_code == 0
+    assert "<a" not in result.output
+    assert "via 鹤屋通贩的小店" in result.output
 
 
 def test_render_weibo_list_empty(capture):

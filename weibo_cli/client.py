@@ -260,8 +260,17 @@ class WeiboClient:
     # ── Weibo Detail ────────────────────────────────────────────────
 
     def get_weibo_detail(self, mblogid: str) -> dict[str, Any]:
-        """Get single weibo detail by mblogid (e.g. 'Qw06Kd98p')."""
-        return self._get(STATUSES_SHOW_URL, params={"id": mblogid}, action="微博详情", unwrap=False)
+        """Get single weibo detail by mblogid (e.g. 'Qw06Kd98p').
+
+        isGetLongText=true 对齐网页行为：对 isLongText=true 的长微博，服务端
+        会把 text_raw / text 补全为全文（实测：155 → 212 字符、完整结尾 hashtag），
+        否则只返回带「...全文」的截断版。普通微博不受影响。
+        """
+        return self._get(
+            STATUSES_SHOW_URL,
+            params={"id": mblogid, "isGetLongText": "true"},
+            action="微博详情", unwrap=False,
+        )
 
     # ── Comments / Reposts ──────────────────────────────────────────
 

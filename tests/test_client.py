@@ -139,6 +139,7 @@ class TestWeiboDetailAPI:
         assert "/ajax/statuses/show" in call_args[0][1]
         params = call_args[1].get("params", {})
         assert params["id"] == "Qw06Kd98p"
+        assert params["isGetLongText"] == "true"  # 拉长微博全文，否则 text_raw 被截断
 
 
 class TestHotTimelineAPI:

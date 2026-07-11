@@ -70,17 +70,36 @@ def weibos(uid, page, count, as_json, as_yaml):
 @click.command()
 @click.argument("uid")
 @click.option("--page", "-p", default=1, help="页码")
+@click.option("--all", "fetch_all", is_flag=True, help="拉取全部关注（自动翻页）")
+@click.option("--search", "-s", "search", default=None, help="按关键字搜索：本人走微博原生拼音搜索，非本人本地 contains 匹配")
 @structured_output_options
-def following(uid, page, as_json, as_yaml):
+def following(uid, page, fetch_all, search, as_json, as_yaml):
     """查看用户关注列表 (weibo following <uid>)"""
     cred = require_auth()
 
     def _render(data):
         users = data.get("users", []) if isinstance(data, dict) else data
+        # 摘要行：让"只有 19 条"这类情况不再反直觉
+        if isinstance(data, dict):
+            total = data.get("total")
+            kw = data.get("search")
+            if kw is not None:
+                click.echo(f'关注列表 搜索"{kw}" (命中 {len(users)})')
+            elif fetch_all:
+                tot = f"共 {total} 人，" if total is not None else ""
+                loaded = data.get("fetched", len(users))
+                click.echo(f"关注列表 ({tot}已加载 {loaded})")
+            else:
+                tot = f"，共 {total}" if total is not None else ""
+                click.echo(f"关注列表 (第 {page} 页，本页 {len(users)}{tot})")
         render_user_table(users, title="关注列表", empty_msg="暂无关注")
 
     def _action(client):
-        return client.get_following(uid, page=page)
+        # 本人 → followContent（大页 + 原生搜索）；否则 → friendships/friends
+        is_self = uid == client.get_current_uid()
+        return client.get_following_list(
+            uid, is_self=is_self, page=page, fetch_all=fetch_all, q=search,
+        )
 
     handle_command(cred, action=_action, render=_render, as_json=as_json, as_yaml=as_yaml)
 

@@ -179,6 +179,32 @@ class TestSearchWeiboAPI:
         assert call_args[1]["params"]["containerid"] == "100103type=1&q=test"
 
 
+class TestBuildMobileClient:
+    """`.weibo.cn` mobile_cookies 注入：m.weibo.cn 用 .weibo.cn 会话，不复用 .weibo.com。"""
+
+    def test_prefers_mobile_cookies(self, mock_client):
+        from weibo_cli.auth import Credential
+        mock_client.credential = Credential(
+            cookies={"SUB": "com_sub", "SUBP": "com_subp"},
+            mobile_cookies={"SUB": "cn_sub", "SUBP": "cn_subp", "SCF": "cn_scf"},
+        )
+        mobile = mock_client._build_mobile_client()
+        try:
+            assert mobile.cookies.get("SUB") == "cn_sub"  # .weibo.cn SUB，非 .weibo.com
+            assert mobile.cookies.get("SCF") == "cn_scf"
+        finally:
+            mobile.close()
+
+    def test_falls_back_to_main_cookies_when_no_mobile(self, mock_client):
+        # mock_client.credential 无 mobile_cookies → 回退到 .weibo.com cookies（搜索不可用的旧行为）
+        assert mock_client.credential.mobile_cookies == {}
+        mobile = mock_client._build_mobile_client()
+        try:
+            assert mobile.cookies.get("SUB") == "test_sub"
+        finally:
+            mobile.close()
+
+
 # ── handle_command routing tests ──────────────────────────────────────
 
 

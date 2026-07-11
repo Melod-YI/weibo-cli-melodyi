@@ -264,3 +264,210 @@ def test_qr_done_runtime_error_clears_session(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert deleted["called"] is True
     assert "Login succeeded but no cookies" in (result.output + (result.stderr or ""))
+
+
+def test_qr_start_cleans_residual_png(monkeypatch, tmp_path):
+    """qr-start 检测到上次残留的二维码图片会删除并提示（哪怕新路径不同）。"""
+    import os
+
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "CONFIG_DIR", tmp_path)
+
+    # 上次残留：旧 PNG + 旧会话（png_path 指向旧 PNG）
+    old_png = tmp_path / "old.png"
+    old_png.write_bytes(b"OLD")
+    auth_core.save_qr_session(
+        {"qrid": "old", "csrf_token": "c", "cookies": {}, "scan_url": "s"},
+        png_path=str(old_png),
+    )
+
+    # mock 网络/图片生成（不真正打 passport）
+    monkeypatch.setattr(auth_core, "_qr_get_session", lambda client: {
+        "qrid": "new", "csrf_token": "c2", "cookies": {"X-CSRF-TOKEN": "c2"}, "scan_url": "s2",
+    })
+    new_png = tmp_path / "new.png"
+    monkeypatch.setattr(auth_core, "_write_qr_png", lambda data, path: __import__("pathlib").Path(path).write_bytes(b"NEW"))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-start", "--png", str(new_png)])
+    assert result.exit_code == 0, result.output
+    assert not old_png.exists()  # 旧 PNG 已删除
+    assert "之前登录残留" in result.output
+    assert os.path.abspath(str(old_png)) in result.output
+
+
+def test_qr_start_no_residual_no_cleanup_message(monkeypatch, tmp_path):
+    """qr-start 无残留 → 不输出清理提示。"""
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(auth_core, "_qr_get_session", lambda client: {
+        "qrid": "new", "csrf_token": "c2", "cookies": {"X-CSRF-TOKEN": "c2"}, "scan_url": "s2",
+    })
+    monkeypatch.setattr(auth_core, "_write_qr_png", lambda data, path: __import__("pathlib").Path(path).write_bytes(b"NEW"))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-start", "--png", str(tmp_path / "new.png")])
+    assert result.exit_code == 0, result.output
+    assert "已删除" not in result.output
+
+
+def test_qr_done_success_prints_cleanup_message(monkeypatch, tmp_path):
+    """qr-done 成功且 clear_qr_session 返回路径 → 输出登录成功清理提示。"""
+    import weibo_cli.auth as auth_core
+    from weibo_cli.auth import Credential
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: {
+        "qrid": "q", "csrf_token": "c", "cookies": {"SUB": "x"},
+        "scan_url": "s", "created_at": __import__("time").time(),
+    })
+    monkeypatch.setattr(auth_core, "_qr_poll_and_finalize", lambda client, qrid, **kw: Credential(cookies={"SUB": "final"}))
+    monkeypatch.setattr(auth_core, "clear_qr_session", lambda path=None: "/abs/old.png")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 0
+    assert "登录成功，二维码图片已删除" in result.output
+    assert "/abs/old.png" in result.output
+
+
+def test_qr_done_timeout_no_cleanup_message(monkeypatch, tmp_path):
+    """qr-done 轮询超时（会话仍有效）→ 不清理、不输出清理提示。"""
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "load_qr_session", lambda path=None: {
+        "qrid": "q", "csrf_token": "c", "cookies": {"SUB": "x"},
+        "scan_url": "s", "created_at": __import__("time").time(),
+    })
+    def _raise(*a, **kw):
+        raise TimeoutError("poll timed out")
+    monkeypatch.setattr(auth_core, "_qr_poll_and_finalize", _raise)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-done"])
+    assert result.exit_code == 1
+    assert "二维码图片已删除" not in result.output
+
+
+# ── me command ──────────────────────────────────────────────────────
+
+
+def test_me_renders_uid(monkeypatch, profile_response, mock_credential):
+    """weibo me 在纯文本输出中显示当前用户的 uid。"""
+    import weibo_cli.commands.auth as auth_cmds
+    import weibo_cli.commands._common as common
+
+    monkeypatch.setattr(auth_cmds, "require_auth", lambda: mock_credential)
+
+    class _FakeClient:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_current_uid(self): return "1699432410"
+        def get_profile(self, uid):
+            assert uid == "1699432410"
+            return profile_response["data"]
+
+    monkeypatch.setattr(common, "WeiboClient", _FakeClient)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["me"])
+    assert result.exit_code == 0, result.output
+    assert "1699432410" in result.output
+    assert "UID" in result.output
+
+
+# ── following: self-routing + --all/--search ──────────────────────────
+
+
+def _patch_following_client(monkeypatch, fake_client):
+    import weibo_cli.commands.personal as personal
+    import weibo_cli.commands._common as common
+    monkeypatch.setattr(personal, "require_auth", lambda: __import__("weibo_cli.auth", fromlist=["Credential"]).Credential(cookies={"SUB": "x"}))
+    monkeypatch.setattr(common, "WeiboClient", fake_client)
+    return personal, common
+
+
+def test_following_self_routes_to_follow_content(monkeypatch):
+    """本人 uid → is_self=True → followContent，输出含页/总数摘要。"""
+    calls = {}
+
+    class _FakeClient:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_current_uid(self): return "5555027006"
+        def get_following_list(self, uid, *, is_self, page=1, fetch_all=False, q=None):
+            calls["is_self"] = is_self
+            return {"users": [{"idstr": "1", "screen_name": "Alice", "followers_count": 0, "description": ""}],
+                    "total": 308, "fetched": 1, "source": "followContent", "search": None}
+
+    _patch_following_client(monkeypatch, _FakeClient)
+    result = CliRunner().invoke(cli, ["following", "5555027006"])
+    assert result.exit_code == 0, result.output
+    assert calls["is_self"] is True
+    assert "第 1 页" in result.output and "共 308" in result.output
+    assert "Alice" in result.output
+
+
+def test_following_non_self_routes_to_friendships(monkeypatch):
+    """非本人 uid → is_self=False → friendships。"""
+
+    class _FakeClient:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_current_uid(self): return "5555027006"
+        def get_following_list(self, uid, *, is_self, page=1, fetch_all=False, q=None):
+            assert is_self is False
+            return {"users": [{"idstr": "2", "screen_name": "Bob", "followers_count": 0, "description": ""}],
+                    "total": 10, "fetched": 1, "source": "friendships", "search": None}
+
+    _patch_following_client(monkeypatch, _FakeClient)
+    result = CliRunner().invoke(cli, ["following", "1699432410"])
+    assert result.exit_code == 0, result.output
+    assert "Bob" in result.output
+
+
+def test_following_all_summary(monkeypatch):
+    """--all 输出 '已加载 N' 摘要。"""
+
+    class _FakeClient:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_current_uid(self): return "5555027006"
+        def get_following_list(self, uid, *, is_self, page=1, fetch_all=False, q=None):
+            assert fetch_all is True
+            return {"users": [{"idstr": "1", "screen_name": "Alice", "followers_count": 0, "description": ""}],
+                    "total": 308, "fetched": 279, "source": "followContent", "search": None}
+
+    _patch_following_client(monkeypatch, _FakeClient)
+    result = CliRunner().invoke(cli, ["following", "5555027006", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "已加载 279" in result.output and "共 308" in result.output
+
+
+def test_following_search_summary(monkeypatch):
+    """--search 输出搜索摘要行。"""
+
+    class _FakeClient:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_current_uid(self): return "5555027006"
+        def get_following_list(self, uid, *, is_self, page=1, fetch_all=False, q=None):
+            assert q == "bl"
+            return {"users": [{"idstr": "1", "screen_name": "碧蓝航线", "followers_count": 0, "description": ""}],
+                    "total": None, "fetched": 1, "source": "followContent", "search": "bl"}
+
+    _patch_following_client(monkeypatch, _FakeClient)
+    result = CliRunner().invoke(cli, ["following", "5555027006", "-s", "bl"])
+    assert result.exit_code == 0, result.output
+    assert '搜索"bl"' in result.output and "命中 1" in result.output
+    assert "碧蓝航线" in result.output

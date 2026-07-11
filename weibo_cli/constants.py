@@ -41,6 +41,7 @@ REPOST_TIMELINE_URL = "/ajax/statuses/repostTimeline"  # GET → reposts for a w
 # ── Social ──────────────────────────────────────────────────────────
 FRIENDS_URL = "/ajax/friendships/friends"        # GET ?uid= → following list
 FOLLOWERS_URL = "/ajax/friendships/friends"      # GET ?uid=&relate=fans → follower list
+FOLLOW_CONTENT_URL = "/ajax/profile/followContent"  # GET (no uid) → current user's own follows; larger page + native search
 
 # ── Search ──────────────────────────────────────────────────────────
 MOBILE_BASE_URL = "https://m.weibo.cn"

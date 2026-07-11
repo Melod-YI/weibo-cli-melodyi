@@ -13,6 +13,7 @@ from weibo_cli.auth import (
     Credential,
     QRExpiredError,
     _exchange_crossdomain,
+    _exchange_mobile_cookies,
     _qr_get_session,
     _qr_poll_and_finalize,
     _render_qr_half_blocks,
@@ -73,6 +74,29 @@ class TestCredential:
         d = original.to_dict()
         restored = Credential.from_dict(d)
         assert restored.cookies == original.cookies
+
+    def test_mobile_cookies_roundtrip(self):
+        original = Credential(
+            cookies={"SUB": "com_sub", "SUBP": "com_subp"},
+            mobile_cookies={"SUB": "cn_sub", "SUBP": "cn_subp", "SCF": "cn_scf"},
+        )
+        d = original.to_dict()
+        assert "mobile_cookies" in d
+        restored = Credential.from_dict(d)
+        assert restored.mobile_cookies == original.mobile_cookies
+        assert restored.cookies == original.cookies
+
+    def test_mobile_cookies_default_empty(self):
+        cred = Credential(cookies={"SUB": "x"})
+        assert cred.mobile_cookies == {}
+        # to_dict 省略空 mobile_cookies（向后兼容旧凭证格式）
+        assert "mobile_cookies" not in cred.to_dict()
+
+    def test_from_dict_legacy_without_mobile_cookies(self):
+        """老凭证文件（无 mobile_cookies 键）仍能正常加载。"""
+        cred = Credential.from_dict({"cookies": {"SUB": "abc"}, "saved_at": 0})
+        assert cred.cookies == {"SUB": "abc"}
+        assert cred.mobile_cookies == {}
 
 
 # ── Credential persistence ──────────────────────────────────────────
@@ -344,8 +368,12 @@ class TestQrGetSession:
 
 
 class TestQrPollAndFinalize:
-    def _client_with_states(self, states, monkeypatch):
+    def _client_with_states(self, states, monkeypatch, mobile_cookies=None):
         monkeypatch.setattr("weibo_cli.auth._exchange_crossdomain", lambda url, alt: {"SUB": "final", "SUBP": "p"})
+        # _exchange_mobile_cookies 内部自建 client 打真实网络；测试里固定返回 (weibo={}, mobile) 元组，避免误触网络。
+        monkeypatch.setattr(
+            "weibo_cli.auth._exchange_mobile_cookies", lambda url, cookies=None: ({}, mobile_cookies or {})
+        )
         idx = {"i": -1}
         def handler(request):
             idx["i"] += 1
@@ -368,6 +396,24 @@ class TestQrPollAndFinalize:
         cred = _qr_poll_and_finalize(client, "qrid")
         assert cred.cookies["SUB"] == "final"
         assert (tmp_path / "credential.json").exists()
+        client.close()
+
+    def test_mobile_cookies_persisted(self, tmp_path, monkeypatch):
+        """QR 成功后 .weibo.cn mobile_cookies 与 .weibo.com cookies 分域存入凭证。"""
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.CREDENTIAL_FILE", tmp_path / "credential.json")
+        monkeypatch.setattr("weibo_cli.auth.POLL_INTERVAL_S", 0)
+        states = [{"retcode": RETCODE_SUCCESS, "data": {"url": "u", "alt": "a"}}]
+        mobile = {"SUB": "cn_sub", "SUBP": "cn_subp", "SCF": "cn_scf"}
+        client = self._client_with_states(states, monkeypatch, mobile_cookies=mobile)
+        cred = _qr_poll_and_finalize(client, "qrid")
+        # .weibo.com SUB 与 .weibo.cn SUB 分开存放，互不覆盖
+        assert cred.cookies["SUB"] == "final"
+        assert cred.mobile_cookies == mobile
+        assert cred.mobile_cookies["SUB"] == "cn_sub"
+        # 持久化文件里也带 mobile_cookies
+        saved = json.loads((tmp_path / "credential.json").read_text())
+        assert saved["mobile_cookies"] == mobile
         client.close()
 
     def test_expired_raises(self, monkeypatch):
@@ -469,6 +515,97 @@ class TestExchangeCrossdomain:
         assert cookies == {}
 
 
+class TestExchangeMobileCookies:
+    """Single-pass cross-domain exchange: probe data.url ONCE (alt token is
+    single-use), capture .weibo.com cookies from the 302 Set-Cookie + cdurl from
+    the Location, then fetch the cdurl directly for .weibo.cn cookies —
+    bypassing the login.sina.com.cn hop that 403s. Returns (weibo, mobile)."""
+
+    def _patch_client(self, monkeypatch, transport):
+        orig_client = httpx.Client
+        monkeypatch.setattr(
+            "weibo_cli.auth.httpx.Client",
+            lambda *a, **kw: orig_client(
+                *a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}
+            ),
+        )
+
+    def test_single_probe_captures_weibo_com_and_weibo_cn(self, monkeypatch):
+        """一次 data.url 探测同时拿 .weibo.com（302 Set-Cookie）和 .weibo.cn（cdurl 直连），绝不碰 login.sina.com.cn。"""
+        from urllib.parse import quote
+
+        cdurl = "https://passport.weibo.cn/sso/crossdomain?entry=miniblog&action=login&ticket=ST-xyz&display=0&proj=1&savestate=30"
+        location = f"https://login.sina.com.cn/sso/v2/crossdomain?entry=miniblog&action=login&ticket=ST-outer&cdurl={quote(cdurl, safe='')}"
+
+        hits = {"sina": 0, "weibo_cn": 0}
+
+        def handler(request):
+            host = request.url.host or ""
+            if "sina.com.cn" in host:
+                hits["sina"] += 1
+                return httpx.Response(403)  # 真实环境里这步 403，必须被绕过
+            if "passport.weibo.cn" in host:
+                hits["weibo_cn"] += 1
+                return httpx.Response(
+                    200,
+                    headers={"set-cookie": "SUB=cn_sub; Domain=.weibo.cn; Path=/"},
+                )
+            # data.url (passport.weibo.com/sso/v2/login) → 302，Set-Cookie .weibo.com + Location
+            return httpx.Response(
+                302,
+                headers=[
+                    ("set-cookie", "SUB=com_sub; Domain=.weibo.com; Path=/"),
+                    ("set-cookie", "ALC=alc; Domain=passport.weibo.com; Path=/"),
+                    ("location", location),
+                ],
+            )
+
+        transport = httpx.MockTransport(handler)
+        self._patch_client(monkeypatch, transport)
+
+        weibo, mobile = _exchange_mobile_cookies("https://passport.weibo.com/sso/v2/login?alt=ALT-x")
+        # .weibo.com bucket（含 passport.weibo.com 的 ALC）
+        assert weibo.get("SUB") == "com_sub"
+        assert weibo.get("ALC") == "alc"
+        # .weibo.cn bucket（m.weibo.cn 用）
+        assert mobile.get("SUB") == "cn_sub"
+        # 关键：只探了一次 data.url，没碰 login.sina.com.cn
+        assert hits["sina"] == 0
+        assert hits["weibo_cn"] == 1
+
+    def test_no_location_returns_weibo_only(self, monkeypatch):
+        """data.url 直接 200 无 Location → .weibo.com cookies 仍可从 Set-Cookie 拿到，mobile 空。"""
+        def handler(request):
+            return httpx.Response(200, headers={"set-cookie": "SUB=com_sub; Domain=.weibo.com; Path=/"})
+
+        transport = httpx.MockTransport(handler)
+        self._patch_client(monkeypatch, transport)
+        weibo, mobile = _exchange_mobile_cookies("https://passport.weibo.com/sso/v2/login?alt=x")
+        assert weibo.get("SUB") == "com_sub"
+        assert mobile == {}
+
+    def test_no_cdurl_in_location_returns_weibo_only(self, monkeypatch):
+        def handler(request):
+            return httpx.Response(302, headers={"location": "https://login.sina.com.cn/other?foo=bar"})
+
+        transport = httpx.MockTransport(handler)
+        self._patch_client(monkeypatch, transport)
+        weibo, mobile = _exchange_mobile_cookies("https://passport.weibo.com/sso/v2/login?alt=x")
+        assert mobile == {}
+
+    def test_empty_url_returns_empty_tuple(self):
+        assert _exchange_mobile_cookies("") == ({}, {})
+
+    def test_network_failure_returns_empty_tuple(self, monkeypatch):
+        def handler(request):
+            raise httpx.ConnectError("boom")
+
+        transport = httpx.MockTransport(handler)
+        self._patch_client(monkeypatch, transport)
+        # 不应抛异常，登录仍能靠 passport_cookies 成功
+        assert _exchange_mobile_cookies("https://passport.weibo.com/sso/v2/login?alt=x") == ({}, {})
+
+
 class TestQrSessionPersistence:
     def test_save_load_roundtrip(self, tmp_path, monkeypatch):
         monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
@@ -490,4 +627,64 @@ class TestQrSessionPersistence:
         save_qr_session({"qrid": "q", "csrf_token": "c", "cookies": {}, "scan_url": "s"})
         assert (tmp_path / "qr_session.json").exists()
         clear_qr_session()
+        assert not (tmp_path / "qr_session.json").exists()
+
+    def test_save_qr_session_stores_png_path(self, tmp_path, monkeypatch):
+        """png_path 以绝对路径形式持久化，供后续清理使用。"""
+        import os
+
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.QR_SESSION_FILE", tmp_path / "qr_session.json")
+        png = str(tmp_path / "qr.png")
+        session = {"qrid": "q", "csrf_token": "c", "cookies": {}, "scan_url": "s"}
+        save_qr_session(session, png_path=png)
+        loaded = load_qr_session()
+        assert loaded["png_path"] == os.path.abspath(png)
+
+    def test_save_qr_session_omits_png_path_when_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.QR_SESSION_FILE", tmp_path / "qr_session.json")
+        save_qr_session({"qrid": "q", "csrf_token": "c", "cookies": {}, "scan_url": "s"})
+        loaded = load_qr_session()
+        assert "png_path" not in loaded
+
+    def test_clear_deletes_png_and_returns_path(self, tmp_path, monkeypatch):
+        """clear 删除记录的 PNG 文件并返回其绝对路径。"""
+        import os
+
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.QR_SESSION_FILE", tmp_path / "qr_session.json")
+        old_png = tmp_path / "old.png"
+        old_png.write_bytes(b"PNG")
+        save_qr_session(
+            {"qrid": "q", "csrf_token": "c", "cookies": {}, "scan_url": "s"},
+            png_path=str(old_png),
+        )
+
+        returned = clear_qr_session()
+        assert returned == os.path.abspath(str(old_png))
+        assert not old_png.exists()
+        assert not (tmp_path / "qr_session.json").exists()
+
+    def test_clear_without_png_path_returns_none(self, tmp_path, monkeypatch):
+        """会话无 png_path 字段 → 返回 None，会话文件仍删除。"""
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.QR_SESSION_FILE", tmp_path / "qr_session.json")
+        save_qr_session({"qrid": "q", "csrf_token": "c", "cookies": {}, "scan_url": "s"})
+
+        returned = clear_qr_session()
+        assert returned is None
+        assert not (tmp_path / "qr_session.json").exists()
+
+    def test_clear_missing_png_file_returns_none(self, tmp_path, monkeypatch):
+        """记录了 png_path 但文件已不存在 → 返回 None，会话文件仍删除。"""
+        monkeypatch.setattr("weibo_cli.auth.CONFIG_DIR", tmp_path)
+        monkeypatch.setattr("weibo_cli.auth.QR_SESSION_FILE", tmp_path / "qr_session.json")
+        save_qr_session(
+            {"qrid": "q", "csrf_token": "c", "cookies": {}, "scan_url": "s"},
+            png_path=str(tmp_path / "gone.png"),
+        )
+
+        returned = clear_qr_session()
+        assert returned is None
         assert not (tmp_path / "qr_session.json").exists()

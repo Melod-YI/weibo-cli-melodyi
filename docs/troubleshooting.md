@@ -107,58 +107,53 @@ WARNING weibo_cli.client HTTP 500, retrying in 1.2s (1/3) body={"ok":0,"message"
 
 ---
 
-### 问题四：`weibo search` 暂不支持（待修复）
+### 问题四：`weibo search` 的 m.weibo.cn 会话（已修复 2026-07-11）
 
-**结论**：`weibo search <关键词>` 当前不可用，返回的是登录重定向而非搜索结果。
-本节如实记录原因（区分"实测"与"未验证"），避免误导后续维护。
-
-**现象**：
-
-```
-$ weibo search "科技"
-{ "ok": -100, "url": "https://passport.weibo.com/sso/signin?...&url=https%3A%2F%2Fm.weibo.cn%2F" }
-```
+**现状**：`weibo search <关键词>` 已可用（`ok=1`，返回 mblog 列表）。
 
 **根因（实测）**：
 
 `WeiboClient.search_weibo` 走移动端 `m.weibo.cn/api/container/getIndex`
 （`constants.MOBILE_SEARCH_URL`）。但 QR 登录（passport.weibo.com → weibo.com）
 **只建立了 weibo.com 域的会话，没有建立 m.weibo.cn 域的会话**——`SUB` cookie
-是 `.weibo.com` 域，不覆盖 `m.weibo.cn`，m.weibo.cn 需要它自己的 SUB。
+是 `.weibo.com` 域，不覆盖 `m.weibo.cn`（不同注册域 `.weibo.com` vs `.weibo.cn`），
+m.weibo.cn 需要它自己的 SUB。带 weibo.com cookie 打 m.weibo.cn search 容器返回
+`{"ok":-100}`（被 `_handle_response` 抛 `SessionExpiredError`）。
 
-实测（一次性探针，带保存的 6 个 cookie）：
+**修复机制（实测端到端确认）**：
 
-| 请求 | 结果 |
-|---|---|
-| `m.weibo.cn/api/container/getIndex` 匿名（不带 cookie） | HTTP 432（需登录） |
-| `m.weibo.cn/api/container/getIndex` 带 weibo.com cookie | HTTP 200，但 `{"ok":-100,"url":"...登录..."}` |
+QR 成功后 `data.url`（`passport.weibo.com/sso/v2/login?...&alt=ALT-...`）302 时
+设 `.weibo.com` cookies，并重定向到 `login.sina.com.cn/sso/v2/crossdomain?...
+&cdurl=<passport.weibo.cn/sso/crossdomain?...&ticket=...>`。原本 `_exchange_crossdomain`
+用 UA-only client 跟随这条链，`login.sina.com.cn` 这步 **403**，链断在此，
+`.weibo.cn` SUB 从未拿到。
 
-尝试过的桥接（**未成功**）：用 passport 的
-`/sso/login.php?entry=mweibo&...` + 访问 `m.weibo.cn/` 首页，再调 search，
-仍返回登录页 HTML。简单的 SSO 桥接不可靠，未采用。
+修复（`auth._exchange_mobile_cookies` + `Credential.mobile_cookies` +
+`client._build_mobile_client`）：
 
-**关于 weibo.com PC 端 JSON 搜索接口（未验证）**：
+1. 对 `data.url` **只探一次**（`follow_redirects=False`，带 passport 会话 cookie），
+   一次性从 302 Set-Cookie 捕获 `.weibo.com` cookies、从 Location 解析出 `cdurl`。
+   （SSO alt 是一次性令牌，第二次 GET 同 URL 返回 200 不再 302——所以必须单次探测。）
+2. 直连 `passport.weibo.cn/sso/crossdomain?...&ticket=...&savestate=30`（**绕过**会 403 的
+   `login.sina.com.cn`），用 event_hooks 解析 Set-Cookie 头、只收 `.weibo.cn` 域 cookie，
+   存入 `Credential.mobile_cookies`（与 `.weibo.com` 的同名 SUB 分桶，不冲突）。
+3. `_build_mobile_client` 优先用 `mobile_cookies` 打 m.weibo.cn（无则回退原 cookies，
+   向后兼容老凭证）。
+
+实测：用这套 `.weibo.cn` cookie 打 `m.weibo.cn/api/container/getIndex?
+containerid=100103type=1&q=微博` → `ok=1`、9 条 mblog；真实 CLI
+`weibo login --qrcode` → `weibo search 微博`（含 `--json`）均通。
 
 > 注意：之前曾把 `weibo.com/ajax/search/all`、`weibo.com/api/container/getIndex`
 > 返回 404 当作"PC 端无可用 ajax"的证据——这两个路径是**凭命名规律臆造的**，
 > 404 只能说明这两个具体路径不存在，**不能**证明 weibo.com PC 端没有可用的
-> 搜索 JSON 接口。weibo.com PC 是否存在可用 ajax 搜索接口，**尚未验证**。
+> 搜索 JSON 接口。新 SPA（`weibo-pro-next`，s.weibo.com 现已 SPA 化）的搜索 XHR
+> 是 `/ajax/search/all`，但 `weibo.com/ajax/search/all`→404、`s.weibo.com/ajax/search/all`
+> →302→sorry，且 URL 带反爬 `t` token（`getTCode`/`getSearchTScene`，混淆 JS 算），
+> 不带就 404——故未走此路，改用上面的 m.weibo.cn 会话修复。
 
-**已验证可行的备选路径（未实现）**：
-
-`s.weibo.com/weibo?q=<关键词>`（PC HTML 搜索页），用现有 weibo.com 会话 cookie
-（`SUB` 覆盖 `s.weibo.com`）实测可用——带 cookie 返回 200、20 条结果
-（`mid`、`nick-name`、正文 `p.txt` 均可正则解析），无登录重定向。
-
-修复方向（待做，二选一或结合）：
-
-1. **改用 `s.weibo.com` HTML 解析**：用现有会话即可，无需改登录流程。代价是
-   HTML 解析较 JSON 脆，需把移动端 card 解析换成 PC HTML 解析并适配
-   `render_weibo_list`。
-2. **在 QR 登录流程中补建 m.weibo.cn 会话**：保留移动端 JSON API，但 SSO
-   桥接脆弱，探针未跑通，实现复杂。
-
-在修复落地前，`weibo search` 视为不支持。
+`weibo search` 现已支持。老凭证（无 `mobile_cookies`）需重新 `weibo login --qrcode`
+一次以补上 `.weibo.cn` 会话；其他命令不受影响。
 
 ---
 
@@ -192,8 +187,8 @@ with httpx.Client(base_url=BASE_URL, headers=dict(HEADERS), cookies=cookies,
 
 ## 已知遗留（非本次修复范围）
 
-- **`weibo search` 暂不支持**：移动端 `m.weibo.cn` 会话未由 QR 登录建立，详见上文
-  "问题四"。待选定修复方向（s.weibo.cn HTML 解析 / 补建 m.weibo.cn 会话）后实现。
+- **`weibo search` 已支持**：m.weibo.cn 会话由 QR 登录的 cdurl 跨域交换补建
+  （`mobile_cookies`），详见上文"问题四"。老凭证需重新 `weibo login --qrcode` 一次。
 
 ## 后续修复记录
 

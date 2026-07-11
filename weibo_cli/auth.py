@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 import qrcode
@@ -62,21 +63,32 @@ POLL_TIMEOUT_S = 240  # 4 minutes
 
 
 class Credential:
-    """Holds Weibo session cookies."""
+    """Holds Weibo session cookies.
 
-    def __init__(self, cookies: dict[str, str]):
+    `cookies` are the `.weibo.com`-domain session cookies (used for weibo.com/ajax/*
+    and passport). `mobile_cookies`, when present, are the `.weibo.cn`-domain
+    session cookies obtained via the QR cross-domain cdurl exchange; they back
+    `m.weibo.cn` endpoints (keyword search) which require a separate .weibo.cn
+    session that .weibo.com cookies cannot cover (different registrable domain).
+    """
+
+    def __init__(self, cookies: dict[str, str], mobile_cookies: dict[str, str] | None = None):
         self.cookies = cookies
+        self.mobile_cookies = mobile_cookies or {}
 
     @property
     def is_valid(self) -> bool:
         return bool(self.cookies)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"cookies": self.cookies, "saved_at": time.time()}
+        d = {"cookies": self.cookies, "saved_at": time.time()}
+        if self.mobile_cookies:
+            d["mobile_cookies"] = self.mobile_cookies
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Credential:
-        return cls(cookies=data.get("cookies", {}))
+        return cls(cookies=data.get("cookies", {}), mobile_cookies=data.get("mobile_cookies", {}))
 
     def as_cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
@@ -283,8 +295,12 @@ def _display_qr_in_terminal(data: str) -> bool:
 # ── QR session persistence ──────────────────────────────────────────
 
 
-def save_qr_session(session: dict) -> None:
-    """Persist QR session (qrid + csrf + passport cookies) for qr-done."""
+def save_qr_session(session: dict, png_path: str | None = None) -> None:
+    """Persist QR session (qrid + csrf + passport cookies) for qr-done.
+
+    If *png_path* is given, it is resolved to an absolute path and stored so a
+    later qr-start/qr-done can clean up the residual QR image.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "qrid": session["qrid"],
@@ -293,6 +309,8 @@ def save_qr_session(session: dict) -> None:
         "scan_url": session["scan_url"],
         "created_at": time.time(),
     }
+    if png_path:
+        payload["png_path"] = os.path.abspath(png_path)
     QR_SESSION_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
     try:
         QR_SESSION_FILE.chmod(0o600)
@@ -314,12 +332,33 @@ def load_qr_session(path=None) -> dict | None:
         return None
 
 
-def clear_qr_session(path=None) -> None:
-    """Remove QR session file."""
+def clear_qr_session(path=None) -> str | None:
+    """Remove QR session file and any associated residual QR image.
+
+    Returns the absolute path of the PNG that was actually deleted, or None if
+    no image was removed (none recorded, or the file was already gone). The
+    session file itself is always removed when present.
+    """
     f = path or QR_SESSION_FILE
+    removed_png: str | None = None
     if f.exists():
+        # Best-effort: read recorded png_path and delete the residual image too.
+        png_path = None
+        try:
+            data = json.loads(f.read_text())
+            png_path = data.get("png_path")
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to read QR session for image cleanup: %s", e)
+        if png_path and os.path.exists(png_path):
+            try:
+                os.remove(png_path)
+                removed_png = png_path
+                logger.info("Removed residual QR image: %s", png_path)
+            except OSError as e:
+                logger.warning("Failed to remove QR image %s: %s", png_path, e)
         f.unlink()
         logger.info("QR session removed: %s", f)
+    return removed_png
 
 
 def _write_qr_png(data: str, path: str) -> None:
@@ -394,6 +433,100 @@ def _exchange_crossdomain(cross_url: str, alt: str) -> dict:
     return cookies
 
 
+def _exchange_mobile_cookies(
+    cross_url: str, passport_cookies: dict[str, str] | None = None
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Single-pass cross-domain exchange returning BOTH `.weibo.com` and
+    `.weibo.cn` cookie buckets.
+
+    The SSO `alt` token is single-use: the first GET of `cross_url` (data.url =
+    passport.weibo.com/sso/v2/login?...&alt=...) returns 302 (sets .weibo.com
+    cookies + Location carrying the cdurl); a second GET returns 200 with no
+    redirect. So `_exchange_crossdomain` and a separate data.url probe cannot
+    both run — this function probes data.url exactly ONCE, `follow_redirects=
+    False`, capturing:
+
+      * `.weibo.com` cookies from the 302 Set-Cookie (these previously came from
+        `_exchange_crossdomain`'s data.url follow);
+      * the `cdurl` param from the 302 Location.
+
+    It then fetches the cdurl directly (`passport.weibo.cn/sso/crossdomain?...
+    &ticket=...`), bypassing the `login.sina.com.cn` hop that 403s, and captures
+    `.weibo.cn` cookies (the m.weibo.cn session that search needs).
+
+    Set-Cookie headers are parsed directly (not via the cookie jar) so the
+    injected `.weibo.com` session cookies can't collide with the `.weibo.cn`
+    ones of the same name; cookies are bucketed by domain (`weibo.com` vs
+    `weibo.cn`).
+
+    Returns (weibo_cookies, mobile_cookies); both {} on any failure. Login
+    still succeeds via passport_cookies + weibo_cookies even if mobile fails —
+    only m.weibo.cn search stays unavailable in that case.
+    """
+    weibo: dict[str, str] = {}
+    mobile: dict[str, str] = {}
+    if not cross_url:
+        return weibo, mobile
+    ua = PASSPORT_HEADERS["User-Agent"]
+    probe_headers = {
+        "User-Agent": ua,
+        "Accept": "*/*",
+        "Referer": f"{PASSPORT_URL}/",
+    }
+    sess = passport_cookies or {}
+
+    def _bucket_cookies(response: httpx.Response, bucket: dict[str, str], domain_marker: str) -> None:
+        host = response.url.host or ""
+        for raw in response.headers.get_list("set-cookie"):
+            name, _, val = raw.partition("=")
+            name = name.strip()
+            val = val.split(";", 1)[0]
+            domain = ""
+            for part in raw.split(";"):
+                p = part.strip()
+                if p.lower().startswith("domain="):
+                    domain = p.split("=", 1)[1].strip()
+            if name and (domain_marker in domain or domain_marker in host):
+                bucket[name] = val
+
+    try:
+        # Step 1: probe data.url without following → 302 sets .weibo.com cookies
+        # and carries the cdurl in Location. The passport session cookies are
+        # required for the 302 to be issued.
+        with httpx.Client(
+            follow_redirects=False, timeout=httpx.Timeout(30),
+            headers=probe_headers, cookies=sess,
+        ) as probe:
+            resp = probe.get(cross_url)
+            _bucket_cookies(resp, weibo, "weibo.com")
+            location = resp.headers.get("location", "")
+        if not location:
+            logger.debug("mobile cdurl: no Location from %s (status %s)", cross_url, resp.status_code)
+            return weibo, mobile
+        cdurl = unquote(parse_qs(urlparse(location).query).get("cdurl", [""])[0])
+        if not cdurl:
+            logger.debug("mobile cdurl: no cdurl param in Location %s", location[:120])
+            return weibo, mobile
+
+        # Step 2: fetch cdurl directly (bypass login.sina.com.cn) → .weibo.cn cookies
+        def _collect_mobile(response: httpx.Response) -> None:
+            _bucket_cookies(response, mobile, "weibo.cn")
+
+        with httpx.Client(
+            follow_redirects=True, timeout=httpx.Timeout(30),
+            headers=probe_headers, cookies=sess,
+            event_hooks={"response": [_collect_mobile]},
+        ) as c:
+            c.get(cdurl)
+        if mobile:
+            logger.info("Obtained .weibo.cn mobile cookies: %s", sorted(mobile))
+        else:
+            logger.warning("Mobile cdurl exchange returned no .weibo.cn cookies: %s", cdurl[:120])
+    except Exception as e:
+        logger.warning("Mobile (.weibo.cn) cross-domain exchange failed: %s", e)
+    return weibo, mobile
+
+
 def _qr_poll_and_finalize(
     client: httpx.Client,
     qrid: str,
@@ -435,12 +568,19 @@ def _qr_poll_and_finalize(
 
             if retcode == RETCODE_SUCCESS:
                 data = check_data.get("data", {})
+                cross_url = data.get("url", "")
                 passport_cookies = dict(client.cookies.items())
-                cross_cookies = _exchange_crossdomain(data.get("url", ""), data.get("alt", ""))
-                cookies = {**passport_cookies, **cross_cookies}
+                # Single-pass exchange: data.url's alt token is single-use, so
+                # probe it once for both .weibo.com cookies and the cdurl, then
+                # fetch the cdurl for .weibo.cn cookies (m.weibo.cn session).
+                weibo_cross, mobile_cookies = _exchange_mobile_cookies(cross_url, passport_cookies)
+                # Alt token follow (login.sina.com.cn); cross_url="" skips the
+                # now-redundant data.url follow inside _exchange_crossdomain.
+                alt_cookies = _exchange_crossdomain("", data.get("alt", ""))
+                cookies = {**passport_cookies, **weibo_cross, **alt_cookies}
                 if not cookies:
                     raise RuntimeError("Login succeeded but no cookies were obtained")
-                credential = Credential(cookies=cookies)
+                credential = Credential(cookies=cookies, mobile_cookies=mobile_cookies)
                 save_credential(credential)
                 return credential
             elif retcode == RETCODE_QR_NOT_SCANNED:

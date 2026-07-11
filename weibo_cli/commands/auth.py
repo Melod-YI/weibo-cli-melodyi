@@ -69,8 +69,13 @@ def qr_start(png):
 
     import httpx
 
-    from ..auth import _qr_get_session, _write_qr_png, save_qr_session
+    from ..auth import _qr_get_session, _write_qr_png, clear_qr_session, save_qr_session
     from ..constants import PASSPORT_HEADERS, PASSPORT_URL, QR_SESSION_FILE, QR_SESSION_TTL_S
+
+    # 清理上次登录残留的会话与二维码图片（哪怕新 --png 路径不同也清）
+    removed = clear_qr_session()
+    if removed:
+        click.echo(f"检测到之前登录残留的二维码图片，已删除：{removed}")
 
     with httpx.Client(
         base_url=PASSPORT_URL,
@@ -90,7 +95,7 @@ def qr_start(png):
         click.echo(f"error: 生成 PNG 失败: {e}", err=True)
         sys.exit(1)
 
-    save_qr_session(session)
+    save_qr_session(session, png_path=png)
     click.echo(f"image: {png}")
     click.echo(f"qrid: {session['qrid']}")
     click.echo(f"session: {QR_SESSION_FILE}")
@@ -130,7 +135,9 @@ def qr_done(timeout, session_path):
 
     created_at = session.get("created_at", 0)
     if time.time() - created_at > QR_SESSION_TTL_S:
-        clear_qr_session(f)
+        removed = clear_qr_session(f)
+        if removed:
+            click.echo(f"二维码会话已过期，残留图片已删除：{removed}")
         click.echo("error: qr session 已过期，请重新运行 weibo login qr-start", err=True)
         sys.exit(1)
 
@@ -153,20 +160,26 @@ def qr_done(timeout, session_path):
 
             _qr_poll_and_finalize(client, qrid, on_status=_on_status, poll_timeout=timeout)
         except QRExpiredError:
-            clear_qr_session(f)
+            removed = clear_qr_session(f)
+            if removed:
+                click.echo(f"二维码已过期，残留图片已删除：{removed}")
             click.echo("error: 二维码已过期，请重新运行 weibo login qr-start", err=True)
             sys.exit(1)
         except TimeoutError:
             click.echo("status: 轮询超时（会话已保留，可再次运行 weibo login qr-done 重试）", err=True)
             sys.exit(1)
         except RuntimeError as e:
-            clear_qr_session(f)
+            removed = clear_qr_session(f)
+            if removed:
+                click.echo(f"登录失败，残留二维码图片已删除：{removed}")
             click.echo(f"error: {e}", err=True)
             sys.exit(1)
 
     click.echo("status: success")
     click.echo(f"credential saved: {CREDENTIAL_FILE}")
-    clear_qr_session(f)
+    removed = clear_qr_session(f)
+    if removed:
+        click.echo(f"登录成功，二维码图片已删除：{removed}")
 
 
 @click.command()
@@ -217,6 +230,9 @@ def me(as_json, as_yaml):
             return
         lines = []
         lines.append(f"昵称: {user['screen_name']}")
+        uid = user.get("idstr") or user.get("id")
+        if uid:
+            lines.append(f"UID: {uid}")
         if user.get("description"):
             lines.append(f"简介: {user['description']}")
         stats = []

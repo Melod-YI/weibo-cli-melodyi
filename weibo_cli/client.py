@@ -15,6 +15,7 @@ from .constants import (
     BUILD_COMMENTS_URL,
     FEED_GROUPS_URL,
     FOLLOWERS_URL,
+    FOLLOW_CONTENT_URL,
     FRIENDS_TIMELINE_URL,
     FRIENDS_URL,
     GET_CONFIG_URL,
@@ -289,11 +290,174 @@ class WeiboClient:
             "uid": uid, "page": str(page), "relate": "fans",
         }, action="粉丝列表", unwrap=False)
 
+    # ── Following list (self-aware: larger page + native search) ───────
+
+    def get_follow_content(
+        self, *, page: int = 1, next_cursor: int | None = None,
+        sort_type: str = "all", q: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the *current user's own* follow list via followContent.
+
+        This endpoint has no uid param — it always returns the logged-in
+        user's follows, so only call it when uid == get_current_uid(). It has
+        a larger page size (~48-49 vs 19 for friendships/friends) and a native
+        pinyin-aware search (sortType=search&q=...).
+
+        Page 1 is requested with no page/next_cursor; page 2+ must carry both
+        page=<N> and next_cursor=<cursor from the previous page>.
+
+        Returns the inner 'data' dict:
+        {total_number, specialAttention:{users,...},
+         follows:{users, next_cursor, previous_cursor, total_number, has_filtered_attentions}}.
+        """
+        params: dict[str, Any] = {"sortType": sort_type}
+        if q:
+            params["q"] = q
+        if next_cursor is not None:
+            params["page"] = str(page)
+            params["next_cursor"] = str(next_cursor)
+        data = self._request(
+            "GET", FOLLOW_CONTENT_URL, params=params,
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+        return self._handle_response(data, action="关注列表", unwrap=True)
+
+    @staticmethod
+    def _follow_content_users(data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Merge specialAttention + follows users from a followContent page."""
+        users: list[dict[str, Any]] = []
+        for key in ("specialAttention", "follows"):
+            block = data.get(key, {}) if isinstance(data, dict) else {}
+            items = block.get("users", []) if isinstance(block, dict) else []
+            users.extend(items or [])
+        return users
+
+    @staticmethod
+    def _user_id_str(u: dict[str, Any]) -> str:
+        return str(u.get("idstr", u.get("id", ""))) or ""
+
+    @staticmethod
+    def _filter_users(users: list[dict[str, Any]], q: str) -> list[dict[str, Any]]:
+        """Simple case-insensitive contains filter on screen_name/name/description/remark."""
+        needle = (q or "").lower()
+
+        def match(u: dict[str, Any]) -> bool:
+            hay = " ".join(
+                str(u.get(k, "") or "")
+                for k in ("screen_name", "name", "description", "remark")
+            )
+            return needle in hay.lower()
+
+        return [u for u in users if match(u)]
+
+    def _normalize_following(
+        self, users: list[dict[str, Any]], *, total: int | None, source: str, q: str | None,
+    ) -> dict[str, Any]:
+        return {"users": users, "total": total, "fetched": len(users), "source": source, "search": q}
+
+    def _fetch_all_friendships(self, uid: str) -> dict[str, Any]:
+        """Paginate /ajax/friendships/friends for uid until users is empty."""
+        users: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        total: int | None = None
+        for pg in range(1, 101):  # backstop: 100 pages
+            data = self.get_following(uid, page=pg)
+            page_users = data.get("users", []) if isinstance(data, dict) else []
+            if isinstance(data, dict):
+                total = data.get("total_number", total)
+            if not page_users:
+                break
+            for u in page_users:
+                uid_s = self._user_id_str(u)
+                if uid_s and uid_s not in seen:
+                    seen.add(uid_s)
+                    users.append(u)
+        logger.info("following(all, friendships) uid=%s fetched=%d total=%s", uid, len(users), total)
+        return self._normalize_following(users, total=total, source="friendships", q=None)
+
+    def _fetch_all_follow_content(self) -> dict[str, Any]:
+        """Paginate followContent (cursor-based) until next_cursor == 0."""
+        users: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        total: int | None = None
+        page = 1
+        next_cursor: int | None = None
+        for _ in range(100):  # backstop
+            data = self.get_follow_content(page=page, next_cursor=next_cursor)
+            follows = data.get("follows", {}) if isinstance(data, dict) else {}
+            page_users = follows.get("users", []) if isinstance(follows, dict) else []
+            total = follows.get("total_number", total) if isinstance(follows, dict) else total
+            for u in self._follow_content_users(data):
+                uid_s = self._user_id_str(u)
+                if uid_s and uid_s not in seen:
+                    seen.add(uid_s)
+                    users.append(u)
+            next_cursor = follows.get("next_cursor") if isinstance(follows, dict) else None
+            if not page_users or not next_cursor:
+                break
+            page += 1
+        logger.info("following(all, followContent) fetched=%d total=%s", len(users), total)
+        return self._normalize_following(users, total=total, source="followContent", q=None)
+
+    def get_following_list(
+        self, uid: str, *, is_self: bool, page: int = 1,
+        fetch_all: bool = False, q: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a following list, normalized to {users, total, fetched, source, search}.
+
+        Routing:
+        - is_self (uid == current user) → followContent (larger page, native
+          pinyin search when q is given).
+        - otherwise → /ajax/friendships/friends (page-based); q triggers a full
+          fetch + local contains filter.
+
+        Precedence: q > fetch_all > page.
+        """
+        if is_self:
+            if q:
+                data = self.get_follow_content(sort_type="search", q=q)
+                users = self._follow_content_users(data)
+                logger.info("following(search self) q=%s hits=%d", q, len(users))
+                return self._normalize_following(users, total=None, source="followContent", q=q)
+            if fetch_all:
+                return self._fetch_all_follow_content()
+            data = self.get_follow_content(page=1)
+            follows = data.get("follows", {}) if isinstance(data, dict) else {}
+            users = self._follow_content_users(data)
+            total = follows.get("total_number") if isinstance(follows, dict) else None
+            logger.info("following(self page=%d) users=%d total=%s", page, len(users), total)
+            return self._normalize_following(users, total=total, source="followContent", q=None)
+
+        # non-self
+        if q:
+            agg = self._fetch_all_friendships(uid)
+            users = self._filter_users(agg["users"], q)
+            logger.info("following(search non-self) q=%s hits=%d", q, len(users))
+            return self._normalize_following(users, total=agg.get("total"), source="friendships", q=q)
+        if fetch_all:
+            return self._fetch_all_friendships(uid)
+        data = self.get_following(uid, page=page)
+        users = data.get("users", []) if isinstance(data, dict) else []
+        total = data.get("total_number") if isinstance(data, dict) else None
+        logger.info("following(non-self page=%d) users=%d total=%s", page, len(users), total)
+        return self._normalize_following(users, total=total, source="friendships", q=None)
+
     # ── Search ──────────────────────────────────────────────────────
 
     def _build_mobile_client(self) -> httpx.Client:
-        """Build a mobile API client for m.weibo.cn endpoints."""
-        cookies = self.credential.cookies if self.credential else {}
+        """Build a mobile API client for m.weibo.cn endpoints.
+
+        Uses the `.weibo.cn` mobile_cookies from the QR cross-domain cdurl
+        exchange when available — m.weibo.cn needs a .weibo.cn session that the
+        .weibo.com cookies cannot cover. Falls back to the main cookies (which
+        leaves search unavailable, the pre-fix behavior) when absent.
+        """
+        if self.credential and self.credential.mobile_cookies:
+            cookies = self.credential.mobile_cookies
+        elif self.credential:
+            cookies = self.credential.cookies
+        else:
+            cookies = {}
         return httpx.Client(
             base_url=MOBILE_BASE_URL,
             headers=dict(MOBILE_HEADERS),

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-`weibo-cli`（PyPI 包名 `kabi-weibo-cli`，入口命令 `weibo`）是一个只读的微博 CLI：热搜、Feed、搜索、微博详情/评论/转发、用户资料与关注关系。使用 Click + httpx，Python ≥ 3.10，依赖 `uv` 管理环境。**默认输出为纯文本**（agent 友好、低 token），`--json`/`--yaml` 切结构化输出。同时附带 `SKILL.md`，可作为 AI Agent skill 被安装。实际踩过的坑与修复记录在 `docs/troubleshooting.md`。
+`weibo-cli`（PyPI 包名 `kabi-weibo-cli`，入口命令 `weibo`）是一个只读的微博 CLI：热搜、Feed、搜索、微博详情/评论/转发、用户资料与关注关系。使用 Click + httpx，Python ≥ 3.10，依赖 `uv` 管理环境。**默认输出为纯文本**（agent 友好、低 token），`--json`/`--yaml` 切结构化输出。同时附带 `SKILL.md`，可作为 AI Agent skill 被安装。实际踩过的坑与修复记录在 `docs/troubleshooting.md`；网页端 ajax 接口调研（端点/出入参/与现状差异/新功能候选）记录在 `docs/api-investigation.md`。
 
 ## 常用命令
 
@@ -77,7 +77,7 @@ cli.py (Click group, 注册 16 个命令)
 - **响应处理**：`_handle_response(data, action, unwrap=...)` 处理微博统一的 `{ok, data, msg}` 信封。`ok==-100` 或 msg 含登录关键词 → 抛 `SessionExpiredError`；`ok==0` → `WeiboApiError`；`ok==1` → 返回 `data["data"]`（`unwrap=True`，默认）或整个 dict（`unwrap=False`）。**各 API 方法是否 unwrap 取决于该接口数据放在 `data` 里还是顶层**——例如 `get_hot_timeline`/`get_friends_timeline`/`get_weibo_detail`/`get_reposts`/`get_following` 都是 `unwrap=False`，因为 statuses 数组在顶层；改动接口时要核对此设置。
 - **`get_friends_timeline` 必须带 `list_id=""`**：微博服务端 JS 会对 `list_id` 调 `.slice()`，缺失则抛异常返回 HTTP 500。这是真实踩过的坑（见 `docs/troubleshooting.md` 问题一），改该接口时不要去掉这个参数。
 - **当前用户 uid**：`get_current_uid()` 请求 `/ajax/config/get_config` 并从响应头 `x-log-uid` 取 uid（`/ajax/profile/me` 是 404、`get_config` 的 `data` 无 uid 字段，都不可用）。`me` 命令依赖它。
-- **两套 API 表面**：大部分接口走 `weibo.com/ajax/*`（Chrome 145 headers，`constants.HEADERS`）；关键词搜索 `search_weibo` 走 `m.weibo.cn/api/container/getIndex`（移动端 UA，`constants.MOBILE_*`），用 `_build_mobile_client()` 每次新建独立 client。搜索结果从 `cards` 里 `card_type==9` 的 card 提取 `mblog`。**已知遗留**：QR 登录只建立 `weibo.com` 会话，不建立 `m.weibo.cn` 会话，因此 `weibo search` 当前会命中登录重定向、不可用（见 `docs/troubleshooting.md` 问题四），待补建移动端会话或改走 `s.weibo.cn` HTML 解析。
+- **两套 API 表面**：大部分接口走 `weibo.com/ajax/*`（Chrome 145 headers，`constants.HEADERS`）；关键词搜索 `search_weibo` 走 `m.weibo.cn/api/container/getIndex`（移动端 UA，`constants.MOBILE_*`），用 `_build_mobile_client()` 每次新建独立 client。搜索结果从 `cards` 里 `card_type==9` 的 card 提取 `mblog`。m.weibo.cn 在 `.weibo.cn` 域、与 `.weibo.com` 不同注册域，需它自己的 `SUB`，由 QR 登录的 cdurl 跨域交换补建：`_qr_poll_and_finalize` 成功后调 `_exchange_mobile_cookies(data.url, passport_cookies)` 单次探测 data.url（alt 是一次性令牌，不能二次 GET），从 302 Location 解析 `cdurl`（`passport.weibo.cn/sso/crossdomain?...&ticket=...`）直连（绕过会 403 的 `login.sina.com.cn`），把 `.weibo.cn` cookies 存入 `Credential.mobile_cookies`；`_build_mobile_client` 优先用 `mobile_cookies`、无则回退原 `cookies`（向后兼容老凭证）。详见 `docs/troubleshooting.md` 问题四。
 
 ### 认证（`auth.py`）
 

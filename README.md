@@ -119,7 +119,7 @@ weibo home                             # Following timeline
 weibo home --count 10                  # Limit count
 
 # ─── Weibo Detail ───────────────────────────────
-weibo detail <mblogid>                 # View weibo with full stats
+weibo detail <mblogid>                 # View weibo (full text + stats)
 weibo detail Qw06Kd98p --json          # JSON output
 
 # ─── Comments & Reposts ─────────────────────────
@@ -186,7 +186,7 @@ Cookie TTL is **7 days** by default. After expiry, the client automatically atte
 
 ### Notes
 
-- **`weibo search` is currently limited.** Keyword search hits `m.weibo.cn/api/container/getIndex`, but QR login only establishes a `weibo.com` session — so `weibo search` will hit a login redirect after QR login. It works only when browser cookie extraction provides a valid `m.weibo.cn` session. This is a known issue (see [`docs/troubleshooting.md`](./docs/troubleshooting.md)), pending a fix (build `m.weibo.cn` session during login, or parse `s.weibo.cn` HTML).
+- **`weibo search` works after QR login.** Keyword search hits `m.weibo.cn/api/container/getIndex`, which needs a `.weibo.cn` session. QR login now establishes it via the cdurl cross-domain exchange (stored as `mobile_cookies`), so `weibo search` works out of the box after `weibo login --qrcode`. Older credentials without `mobile_cookies` need to re-login once. Plain-text output also shows each card's `uid=<id>` so you can jump to `weibo profile <uid>` / `weibo weibos <uid>` from a search result.
 
 ### Development
 
@@ -331,7 +331,7 @@ weibo feed --count 5                   # 限制数量
 weibo home                             # 关注者时间线
 
 # 微博详情与评论
-weibo detail Qw06Kd98p                 # 查看微博
+weibo detail Qw06Kd98p                 # 查看微博（含长微博全文）
 weibo comments Qw06Kd98p               # 查看评论
 weibo reposts Qw06Kd98p                # 查看转发
 
@@ -352,7 +352,7 @@ weibo followers 1699432410             # 用户粉丝列表
 
 ### 注意事项
 
-- **`weibo search` 当前受限。** 关键词搜索走 `m.weibo.cn/api/container/getIndex`，但 QR 登录只建立 `weibo.com` 会话，因此 QR 登录后 `weibo search` 会命中登录重定向。仅当浏览器 Cookie 提取提供了有效的 `m.weibo.cn` 会话时才可用。这是已知问题（见 [`docs/troubleshooting.md`](./docs/troubleshooting.md)），待修复（登录时补建 `m.weibo.cn` 会话，或改走 `s.weibo.cn` HTML 解析）。
+- **`weibo search` 在 QR 登录后即可用。** 关键词搜索走 `m.weibo.cn/api/container/getIndex`，需要 `.weibo.cn` 会话。QR 登录现已通过 cdurl 跨域交换补建该会话（存为 `mobile_cookies`），所以 `weibo login --qrcode` 后 `weibo search` 直接可用。无 `mobile_cookies` 的老凭证需重新登录一次。纯文本输出每条卡片带 `uid=<id>`，可从搜索结果直接跳转 `weibo profile <uid>` / `weibo weibos <uid>`。
 
 ### 作为 AI Agent Skill 使用
 

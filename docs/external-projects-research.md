@@ -63,7 +63,7 @@
 - **还禁用了重定向中间件**（`settings.py:23`），证明带有效 weibo.com cookie 访问 s.weibo.com 不会触发登录跳转——直接印证域名结论。
 - **额外可借鉴 endpoint**：
   - `weibo.com/ajax/statuses/searchProfile?uid=...&haspic=1&hasvideo=1&hasmusic=1&hasret=1`（按用户抓微博，带类型/时间过滤，可增强我们 `weibos` 命令）
-  - `weibo.com/ajax/statuses/longtext?id={mblogid}`（长微博全文，我们没有）
+  - `weibo.com/ajax/statuses/longtext?id={mblogid}`（长微博全文——WeiboSpider 走此路；我们 2026-07-11 已用 `get_weibo_detail` 加 `isGetLongText=true` 等价覆盖，未单独引入该端点）
   - `weibo.com/ajax/profile/detail?uid={uid}`（生日/教育/公司/IP属地/阳光信用，比 `profile/info` 更全）
   - `weibo.com/ajax/statuses/buildComments?...&id={mid}` 与 `repostTimeline?id={mid}` 收 **mid（数字）** 而非 mblogid
 - 工具函数 `common.py:45 url_to_mid`：mblogid（base62 短串）→ mid（数字）解码，评论/转发接口要 mid 时可直接抄。
@@ -107,7 +107,7 @@
 1. **🔴 验证 tamnd 假设（先做、成本最低）**：补 `MWeibo-Pwa: 1` header 打 m.weibo.cn getIndex，确认搜索 bug 根因到底是"域"还是"header"。若通则最小修复。
 2. **🟠 搜索改走 s.weibo.com HTML**（若验证 1 不通）：抄 weibo-search 的 XPath 或 WeiboSpider 的 HTML + ajax 二次查详情。这是最稳的修法，且复用现有 QR 会话。
 3. **🟡 补 `weibo suggest` 命令**：走 `weibo.com/ajax/side/search`（匿名可用），给 agent 一个"关键词→联想词/相关热搜"的降级能力。tamnd 有现成实现（`weibo/api.go:162-184`、`weibo/wire.go:89-95`）。净增量。
-4. **🟡 补长微博全文 `ajax/statuses/longtext`**：WeiboSpider `common.py:136`，我们没有。
+4. **✅ 补长微博全文**（2026-07-11 已做）：`get_weibo_detail` 加 `isGetLongText=true`，实测与 `ajax/statuses/longtext` 的 `longTextContent` 一致，故未引入该端点。见 `docs/troubleshooting.md` 2026-07-11 条。
 5. **🟡 增强按用户抓微博**：用 `weibo.com/ajax/statuses/searchProfile`（带 `haspic/hasvideo/hasmusic/hasret` 类型过滤 + `starttime/endtime` 时间窗）替换/补充我们 `weibos` 命令。
 6. **🟢 工具函数 `url_to_mid`**（base62→mid）：WeiboSpider `common.py:45`，评论/转发接口收 mid 时可直接抄。
 7. **🟢 访客 cookie fetcher 作为只读命令的回退凭证**：weibo-scrape 的 Playwright 实现 + cookie 缓存设计（flock + TTL 2h + 撞 432 force_refresh）。

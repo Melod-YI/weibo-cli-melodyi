@@ -161,7 +161,7 @@ containerid=100103type=1&q=微博` → `ok=1`、9 条 mblog；真实 CLI
 
 ```bash
 # 单测
-uv run pytest tests/                  # 163 passed, 1 skipped（Windows 权限测试在 win32 跳过）
+uv run pytest tests/                  # 203 passed, 1 skipped（Windows 权限测试在 win32 跳过）
 
 # 端到端
 weibo -v home --count 3               # 返回真实关注 Feed
@@ -182,6 +182,53 @@ with httpx.Client(base_url=BASE_URL, headers=dict(HEADERS), cookies=cookies,
     print(r.status_code, r.text[:500])     # 看 5xx 的真实 body
     print(r.headers.get("x-log-uid"))      # 当前登录 uid
 ```
+
+---
+
+## 2026-07-11：长微博详情截断 & 来源字段漏 HTML
+
+### 问题一：`weibo detail` 长微博正文被截断
+
+**现象**：对 `isLongText=true` 的长微博，`weibo detail` 输出的 `text_raw` 是截断版
+（半句结尾、带零宽空格 `​`），看不到全文。
+
+**根因**：网页端拉详情带 `isGetLongText=true` 参数，`get_weibo_detail` 未传。
+对 `isLongText=true` 的微博，服务端在不带该参数时只返回截断 `text` / `text_raw`。
+
+**证据**（一次性探针对同一条长微博 `R8cuZ8uMW` 打三种取法对比）：
+
+| 取法 | `text_raw` 长度 | 结尾 |
+|------|---------------|------|
+| A. `/ajax/statuses/show`（无额外参数，现状） | 155 | `…全高约1 ​​​`（截断） |
+| B. `/ajax/statuses/show?isGetLongText=true` | 212 | `…#胜利女神nikke[超话]#`（全文） |
+| C. `/ajax/statuses/longtext?id=…` 的 `longTextContent` | 212 | 与 B 一致 |
+
+**修复**：`get_weibo_detail` 加 `isGetLongText=true` 参数。B 已拿到与 C 一致的全文，
+按 YAGNI 不引入 `/ajax/statuses/longtext` 端点（C 的备选能力已由 B 覆盖）。
+
+**测试**：`tests/test_client.py::TestWeiboDetailAPI::test_get_weibo_detail` 断言
+请求 params 含 `isGetLongText=true`；`tests/test_renderers.py::test_detail_command_shows_uid_and_full_text`
+断言渲染长微博结尾 hashtag（非截断）。
+
+### 问题二：`detail` / `weibos` 的来源（`via`）漏出 HTML 标签
+
+**现象**：当微博来源带超链（如「来自 XX 的小店」）时，`via` 后直接输出
+`<a target="_blank" href="...">鹤屋通贩的小店</a>`，而非纯文本「鹤屋通贩的小店」。
+
+**根因**：`detail._render` 与 `render_weibo_card`（show_user=False 分支）取 `source`
+后**未过 `strip_html`**，与同函数里正文 `text` 走 `strip_html` 不一致。
+纯文本来源（如「iPhone 客户端」）平时掩盖了此 bug，只在带链接来源时暴露。
+
+**修复**：两处 `source` 均改为 `strip_html(...)`，与正文处理对齐。
+
+**测试**：`tests/test_renderers.py::test_render_weibo_card_source_strips_html`、
+`test_detail_command_source_strips_html`，断言输出无 `<a` 且保留链接文本。
+
+### 附带增强：列表卡片与详情显示作者 uid
+
+打通「search/feed/home 列表或 detail → `weibo profile <uid>` / `weibo weibos <uid>`」
+链路：`render_weibo_card` 的 `@name` 行追加 `uid=<idstr|id>`；`detail` 渲染加 `UID: <uid>` 单独行。
+属功能增强（非 bug），按 CLAUDE.md 约定补渲染测试而非严格 TDD。
 
 ---
 

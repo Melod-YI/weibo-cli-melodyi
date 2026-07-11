@@ -100,7 +100,7 @@ weibo hot --json | jq '.realtime[:3]'  # Filter with jq
 | `weibo search <keyword>` | Search weibos by keyword | `weibo search "科技" --count 5 --json` |
 | `weibo feed` | Hot timeline | `weibo feed --count 5 --json` |
 | `weibo home` | Following timeline | `weibo home --count 10 --json` |
-| `weibo detail <mblogid>` | View weibo with stats | `weibo detail Qw06Kd98p --json` |
+| `weibo detail <mblogid>` | View weibo (full text + stats) | `weibo detail Qw06Kd98p --json` |
 | `weibo comments <mblogid>` | View comments | `weibo comments Qw06Kd98p --count 10` |
 | `weibo reposts <mblogid>` | View reposts/forwards | `weibo reposts Qw06Kd98p --count 5` |
 | `weibo profile <uid>` | User profile | `weibo profile 1699432410 --json` |
@@ -144,6 +144,24 @@ weibo weibos 1699432410 --count 3 --json
 ```bash
 weibo comments Qw06Kd98p --json | jq '.data[:5] | .[].text_raw'
 ```
+
+### From a search result to its author's profile & posts
+
+Plain-text output of `search`/`feed`/`home`/`detail` exposes the author's `uid`, so you can
+chain from any weibo you discover into that author's profile and post list. Parse `uid=<...>`
+from the card line, or use `--json` and read `mblog.user.idstr`:
+
+```bash
+# Search, then grab the first result's author uid from the plain-text card line
+UID=$(weibo search "nikke" --count 1 | grep -oP 'uid=\K[0-9]+' | head -1)
+# Or via JSON: UID=$(weibo search "nikke" --json | jq -r '[.data.cards[]?.mblog? | .user.id // empty] | .[0]')
+
+weibo profile "$UID"                  # Author's profile
+weibo weibos "$UID" --count 10       # Author's recent weibos
+weibo following "$UID"               # Who the author follows
+```
+
+`weibo detail <mblogid>` prints a dedicated `UID: <uid>` line for the same purpose.
 
 ### Daily monitoring workflow
 

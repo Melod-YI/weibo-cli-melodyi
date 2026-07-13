@@ -62,15 +62,25 @@ def login(ctx, qrcode, cookie_source):
 
 
 @login.command(name="qr-start")
-@click.option("--png", required=True, help="二维码 PNG 输出路径")
-def qr_start(png):
-    """生成二维码登录图片（非交互），配合 weibo login qr-done 完成。"""
+@click.option("--png", "png", default=None, help="二维码 PNG 输出路径（agent 两段式用）")
+@click.option("--terminal", "render_terminal", is_flag=True, help="直接在终端渲染二维码（强制黑底白字，黑底终端也可扫）")
+def qr_start(png, render_terminal):
+    """生成二维码登录（非交互），配合 weibo login qr-done 完成。
+
+    至少指定 --png 或 --terminal 之一：--png 写文件供 agent 转发；
+    --terminal 直接在终端输出可扫码的二维码（强制配色，黑底终端亦可）。
+    两者可同时使用。
+    """
     import sys
 
     import httpx
 
     from ..auth import _qr_get_session, _write_qr_png, clear_qr_session, save_qr_session
     from ..constants import PASSPORT_HEADERS, PASSPORT_URL, QR_SESSION_FILE, QR_SESSION_TTL_S
+
+    if not png and not render_terminal:
+        click.echo("error: 需要指定输出目标：--png <路径> 写图片，或 --terminal 终端渲染", err=True)
+        sys.exit(1)
 
     # 清理上次登录残留的会话与二维码图片（哪怕新 --png 路径不同也清）
     removed = clear_qr_session()
@@ -89,14 +99,21 @@ def qr_start(png):
             click.echo(f"error: 获取二维码会话失败: {e}", err=True)
             sys.exit(1)
 
-    try:
-        _write_qr_png(session["scan_url"], png)
-    except Exception as e:
-        click.echo(f"error: 生成 PNG 失败: {e}", err=True)
-        sys.exit(1)
+    if png:
+        try:
+            _write_qr_png(session["scan_url"], png)
+        except Exception as e:
+            click.echo(f"error: 生成 PNG 失败: {e}", err=True)
+            sys.exit(1)
 
     save_qr_session(session, png_path=png)
-    click.echo(f"image: {png}")
+    if render_terminal:
+        from ..auth import _display_qr_in_terminal
+
+        click.echo("请使用微博APP扫描以下二维码登录（黑底终端亦可）：")
+        _display_qr_in_terminal(session["scan_url"])
+    if png:
+        click.echo(f"image: {png}")
     click.echo(f"qrid: {session['qrid']}")
     click.echo(f"session: {QR_SESSION_FILE}")
     click.echo(f"qr_expires_in: {QR_SESSION_TTL_S}")

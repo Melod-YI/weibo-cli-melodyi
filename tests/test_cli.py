@@ -315,6 +315,44 @@ def test_qr_start_no_residual_no_cleanup_message(monkeypatch, tmp_path):
     assert "已删除" not in result.output
 
 
+def test_qr_start_terminal_renders_colored_qr(monkeypatch, tmp_path):
+    """qr-start --terminal 在终端渲染强制配色的二维码，仍保存会话并打印结构化字段。"""
+    import weibo_cli.auth as auth_core
+    from weibo_cli.auth import _QR_BLACK_FG, _QR_WHITE_BG
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(auth_core, "_qr_get_session", lambda client: {
+        "qrid": "t1", "csrf_token": "c", "cookies": {"X-CSRF-TOKEN": "c"}, "scan_url": "https://scan.example/qr",
+    })
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-start", "--terminal"])
+    assert result.exit_code == 0, result.output
+    # 终端渲染：强制黑墨 + 白底，黑底终端亦可扫
+    assert _QR_BLACK_FG in result.output
+    assert _QR_WHITE_BG in result.output
+    # 仍打印结构化字段并保存会话
+    assert "qrid: t1" in result.output
+    assert "session:" in result.output
+    assert (tmp_path / "qr_session.json").exists()
+
+
+def test_qr_start_without_target_errors(monkeypatch, tmp_path):
+    """qr-start 不给 --png 也不给 --terminal → 非零退出并提示。"""
+    import weibo_cli.auth as auth_core
+
+    monkeypatch.setattr(auth_core, "QR_SESSION_FILE", tmp_path / "qr_session.json")
+    monkeypatch.setattr(auth_core, "CONFIG_DIR", tmp_path)
+    # 不该真正拉会话
+    monkeypatch.setattr(auth_core, "_qr_get_session", lambda client: pytest.fail("不应在缺目标时拉会话"))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["login", "qr-start"])
+    assert result.exit_code != 0
+    assert "输出目标" in result.output or "--terminal" in result.output
+
+
 def test_qr_done_success_prints_cleanup_message(monkeypatch, tmp_path):
     """qr-done 成功且 clear_qr_session 返回路径 → 输出登录成功清理提示。"""
     import weibo_cli.auth as auth_core

@@ -50,6 +50,17 @@ from .exceptions import QRExpiredError
 
 logger = logging.getLogger(__name__)
 
+# ── ANSI SGR for forced QR colors ───────────────────────────────────
+# 256-color codes: 0 = black, 15 = bright white. Forced so QR renders
+# black-on-white regardless of the terminal's default fg/bg (dark-bg
+# Windows bash would otherwise invert the half-block colors and break
+# scanning). See _render_qr_half_blocks.
+_QR_BLACK_FG = "\033[38;5;0m"
+_QR_WHITE_FG = "\033[38;5;15m"
+_QR_BLACK_BG = "\033[48;5;0m"
+_QR_WHITE_BG = "\033[48;5;15m"
+_QR_RESET = "\033[0m"
+
 # Credential TTL: warn and attempt refresh after 7 days
 CREDENTIAL_TTL_DAYS = 7
 _CREDENTIAL_TTL_SECONDS = CREDENTIAL_TTL_DAYS * 86400
@@ -224,12 +235,21 @@ def extract_browser_credential(
 # ── QR Code terminal rendering ──────────────────────────────────────
 
 
-def _render_qr_half_blocks(matrix: list[list[bool]]) -> str:
-    """Render QR matrix using Unicode half-block characters (▀▄█ and space)."""
+def _render_qr_half_blocks(matrix: list[list[bool]], *, invert: bool = False) -> str:
+    """Render QR matrix using Unicode half-block characters (▀▄█), forcing
+    black-on-white via ANSI SGR so the result is scannable on any terminal
+    regardless of its default fg/bg colors (incl. dark-bg Windows bash).
+
+    QR dark module (matrix True) → BLACK ink; light module → WHITE ink
+    (or swapped when invert=True). Half-block semantics:
+      ▀ = top half = fg, bottom half = bg
+      ▄ = bottom half = fg, top half = bg
+      █ = full cell = fg
+    """
     if not matrix:
         return ""
 
-    # Add 1-module quiet zone
+    # Add 1-module quiet zone (light → white, with forced colors it stays white)
     size = len(matrix)
     padded = [[False] * (size + 2)]
     for row in matrix:
@@ -245,28 +265,42 @@ def _render_qr_half_blocks(matrix: list[list[bool]]) -> str:
         logger.warning("Terminal too narrow (%d) for QR (%d)", term_cols, qr_width)
         return ""
 
+    # FG vs BG roles (escape codes differ: 38; vs 48;)
+    dark_fg, dark_bg = (_QR_BLACK_FG, _QR_BLACK_BG) if not invert else (_QR_WHITE_FG, _QR_WHITE_BG)
+    light_fg, light_bg = (_QR_WHITE_FG, _QR_WHITE_BG) if not invert else (_QR_BLACK_FG, _QR_BLACK_BG)
     lines: list[str] = []
     for y in range(0, rows, 2):
-        line = ""
         top_row = matrix[y]
         bottom_row = matrix[y + 1] if y + 1 < rows else [False] * len(top_row)
+        out: list[str] = []
+        cur_fg = cur_bg = None
         for x in range(len(top_row)):
             top = top_row[x]
             bottom = bottom_row[x]
             if top and bottom:
-                line += "█"
+                ch, fg, bg = "█", dark_fg, None
+            elif not top and not bottom:
+                ch, fg, bg = "█", light_fg, None
             elif top and not bottom:
-                line += "▀"
-            elif not top and bottom:
-                line += "▄"
-            else:
-                line += " "
-        lines.append(line)
+                ch, fg, bg = "▀", dark_fg, light_bg  # fg=top(dark), bg=bottom(light)
+            else:  # not top and bottom
+                ch, fg, bg = "▄", dark_fg, light_bg  # fg=bottom(dark), bg=top(light)
+            if fg != cur_fg or bg != cur_bg:
+                if fg is not None and fg != cur_fg:
+                    out.append(fg)
+                    cur_fg = fg
+                if bg is not None and bg != cur_bg:
+                    out.append(bg)
+                    cur_bg = bg
+            out.append(ch)
+        out.append(_QR_RESET)
+        lines.append("".join(out))
     return "\n".join(lines)
 
 
-def _display_qr_in_terminal(data: str) -> bool:
-    """Display *data* as a QR code in the terminal using Unicode half-blocks.
+def _display_qr_in_terminal(data: str, *, invert: bool = False) -> bool:
+    """Display *data* as a QR code in the terminal using Unicode half-blocks,
+    forcing black-on-white so it scans on any terminal.
 
     Returns True on success.
     """
@@ -275,12 +309,16 @@ def _display_qr_in_terminal(data: str) -> bool:
     qr.make(fit=True)
     modules = qr.get_matrix()
 
-    rendered = _render_qr_half_blocks(modules)
+    rendered = _render_qr_half_blocks(modules, invert=invert)
     if rendered:
         print(rendered)
         return True
 
-    # Fallback to basic ASCII
+    # Fallback to basic ASCII — still force white bg + black fg so the
+    # dark/light cells read correctly on dark terminals.
+    import io
+
+    buf = io.StringIO()
     qr2 = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_L,
         box_size=1,
@@ -288,7 +326,8 @@ def _display_qr_in_terminal(data: str) -> bool:
     )
     qr2.add_data(data)
     qr2.make(fit=True)
-    qr2.print_ascii(invert=True)
+    qr2.print_ascii(invert=not invert, out=buf)
+    print(f"{_QR_WHITE_BG}{_QR_BLACK_FG}{buf.getvalue()}{_QR_RESET}")
     return True
 
 

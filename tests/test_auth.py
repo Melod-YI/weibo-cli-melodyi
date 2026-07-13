@@ -17,6 +17,10 @@ from weibo_cli.auth import (
     _qr_get_session,
     _qr_poll_and_finalize,
     _render_qr_half_blocks,
+    _QR_BLACK_FG,
+    _QR_RESET,
+    _QR_WHITE_BG,
+    _QR_WHITE_FG,
     clear_credential,
     clear_qr_session,
     extract_browser_credential,
@@ -322,6 +326,34 @@ class TestQRRendering:
         result = _render_qr_half_blocks(matrix)
         # Should produce spaces (with quiet zone)
         assert isinstance(result, str)
+
+    def test_render_forces_black_ink_on_dark_modules(self):
+        """全暗矩阵的暗格用黑墨（quiet zone 仍是白，所以白墨会出现，属正常）。"""
+        matrix = [[True, True], [True, True]]
+        r = _render_qr_half_blocks(matrix)
+        assert _QR_BLACK_FG in r  # 暗格强制黑
+        assert _QR_RESET in r  # 行尾复位，防颜色泄漏
+
+    def test_render_forces_white_ink_on_light_modules(self):
+        """全亮矩阵 → 每格用白墨，无黑墨（含 quiet zone 全白）。"""
+        matrix = [[False, False], [False, False]]
+        r = _render_qr_half_blocks(matrix)
+        assert _QR_WHITE_FG in r
+        assert _QR_BLACK_FG not in r  # 无暗格 → 不该出现黑墨
+
+    def test_render_mixed_uses_white_background(self):
+        """混合格（▀/▄）必须设白底，否则暗格旁的亮格会露出终端默认黑底。"""
+        # 单行 [dark, light]：top 一暗一亮，bottom 全为 quiet-zone 亮
+        matrix = [[True, False]]
+        r = _render_qr_half_blocks(matrix)
+        assert _QR_WHITE_BG in r  # 亮半格用白底
+        assert _QR_BLACK_FG in r  # 暗半格用黑墨
+
+    def test_render_invert_swaps_colors(self):
+        """invert=True 时暗格改用白墨（quiet zone 改用黑，属正常）。"""
+        matrix = [[True, True], [True, True]]
+        r = _render_qr_half_blocks(matrix, invert=True)
+        assert _QR_WHITE_FG in r  # 暗格→白
 
 
 class TestQrGetSession:

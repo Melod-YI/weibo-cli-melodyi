@@ -96,20 +96,35 @@ def detail(mblogid, as_json, as_yaml):
 
 @click.command()
 @click.argument("mblogid")
-@click.option("--count", "-n", default=20, help="评论条数")
+@click.option("--count", "-n", default=20, help="每页评论条数")
+@click.option("--max-id", "max_id", default=0, type=int, help="分页游标：上一页返回的 max_id，用于取下一页")
 @structured_output_options
-def comments(mblogid, count, as_json, as_yaml):
-    """查看微博评论 (weibo comments <mblogid>)"""
+def comments(mblogid, count, max_id, as_json, as_yaml):
+    """查看微博评论 (weibo comments <mblogid>)
+
+    超过一页时，用上一页返回的 max_id 取下一页：
+    weibo comments <mblogid> --max-id <值>
+    """
     cred = require_auth()
 
     def _render(data):
-        comment_list = data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
-        render_comment_list(comment_list, count=count)
+        if isinstance(data, dict):
+            comment_list = data.get("data", []) or []
+            total = data.get("total_number")
+            next_max_id = data.get("max_id")
+            if total is not None:
+                click.echo(f"评论 共 {total} 条，本页 {len(comment_list)}")
+            if next_max_id:
+                click.echo(f"下页: weibo comments {mblogid} --max-id {next_max_id}")
+            render_comment_list(comment_list, count=count)
+        else:
+            # 兼容裸 list（旧格式）
+            render_comment_list(data, count=count)
 
     def _action(client):
         weibo = client.get_weibo_detail(mblogid)
         weibo_id = str(weibo.get("id", weibo.get("mid", "")))
-        return client.get_comments(weibo_id, count=count)
+        return client.get_comments(weibo_id, count=count, max_id=max_id)
 
     handle_command(cred, action=_action, render=_render, as_json=as_json, as_yaml=as_yaml)
 

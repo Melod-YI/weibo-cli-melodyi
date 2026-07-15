@@ -420,6 +420,49 @@ def test_me_renders_uid(monkeypatch, profile_response, mock_credential):
     assert "UID" in result.output
 
 
+# ── comments: 分页游标 + 总数 ───────────────────────────────────────
+
+
+def test_comments_renders_total_and_next_max_id(monkeypatch, mock_credential):
+    """weibo comments 显示总数 + 下页 max_id 提示，并透传 --max-id 给 get_comments。
+
+    修复前 get_comments(unwrap=True) 丢掉 max_id/total_number，无法翻页也看不到总数。
+    """
+    import weibo_cli.commands.search as search_cmds
+    import weibo_cli.commands._common as common
+
+    monkeypatch.setattr(search_cmds, "require_auth", lambda: mock_credential)
+
+    calls = {}
+
+    class _FakeClient:
+        def __init__(self, cred): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_weibo_detail(self, mblogid):
+            return {"id": "5320572859057678", "mblogid": mblogid}
+        def get_comments(self, weibo_id, count=20, max_id=0):
+            calls["weibo_id"] = weibo_id
+            calls["max_id"] = max_id
+            return {
+                "ok": 1,
+                "data": [{"id": 1, "text": "c1", "user": {"screen_name": "A"}, "created_at": "x", "like_counts": 0}],
+                "max_id": 1411715483823358,
+                "total_number": 258,
+            }
+
+    monkeypatch.setattr(common, "WeiboClient", _FakeClient)
+
+    result = CliRunner().invoke(cli, ["comments", "R8Dc1C0jA", "--max-id", "999"])
+    assert result.exit_code == 0, result.output
+    # --max-id 透传到 get_comments；weibo_id 由 get_weibo_detail 解析（数字 id）
+    assert calls["max_id"] == 999
+    assert calls["weibo_id"] == "5320572859057678"
+    # 总数 + 下页游标提示（修复后这两条信息不再被 unwrap 丢掉）
+    assert "共 258 条" in result.output
+    assert "下页: weibo comments R8Dc1C0jA --max-id 1411715483823358" in result.output
+
+
 # ── following: self-routing + --all/--search ──────────────────────────
 
 

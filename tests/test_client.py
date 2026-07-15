@@ -203,6 +203,31 @@ class TestCommentsAPI:
         params = mock_client._http.request.call_args[1].get("params", {})
         assert params["max_id"] == "999"
 
+    def test_get_comments_returns_full_dict_with_pagination(self, mock_client):
+        """unwrap=False：返回完整 dict，保留 max_id(下页游标) 与 total_number(总数)。
+
+        修复前 unwrap=True 会丢掉这两个字段（与 data 同层），导致无法翻页、拿不到总数。
+        """
+        comments_response = {
+            "ok": 1,
+            "data": [{"id": 1, "text": "c1"}, {"id": 2, "text": "c2"}],
+            "max_id": 1411715483823358,
+            "total_number": 258,
+            "rootComment": {},
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = json.dumps(comments_response)
+        mock_resp.json.return_value = comments_response
+        mock_resp.cookies = httpx.Cookies()
+        mock_client._http.request.return_value = mock_resp
+
+        result = mock_client.get_comments("5320572859057678")
+        assert isinstance(result, dict), "应返回完整 dict 而非裸 list"
+        assert result["max_id"] == 1411715483823358
+        assert result["total_number"] == 258
+        assert len(result["data"]) == 2
+
 
 class TestRepostsAPI:
     def test_get_reposts(self, mock_client):

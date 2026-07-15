@@ -275,11 +275,17 @@ class WeiboClient:
     # ── Comments / Reposts ──────────────────────────────────────────
 
     def get_comments(self, weibo_id: str, count: int = 20, max_id: int = 0) -> dict[str, Any]:
-        """Get comments for a weibo."""
+        """Get comments for a weibo.
+
+        Returns the full buildComments response dict (unwrap=False) because
+        `max_id` (next-page cursor) and `total_number` are siblings of the
+        `data` comment array at the top level — unwrap=True would drop them and
+        break pagination / hide the total count.
+        """
         params: dict[str, Any] = {"id": weibo_id, "is_show_bulletin": "2", "count": str(count), "flow": "0"}
         if max_id:
             params["max_id"] = str(max_id)
-        return self._get(BUILD_COMMENTS_URL, params=params, action="评论")
+        return self._get(BUILD_COMMENTS_URL, params=params, action="评论", unwrap=False)
 
     def get_reposts(self, weibo_id: str, page: int = 1, count: int = 10) -> dict[str, Any]:
         """Get repost/forward list for a weibo."""

@@ -19,7 +19,7 @@
 | `get_profile` | `/ajax/profile/info?uid=X` | `/ajax/profile/info?uid=X&scene=profile` | ⚠️ 缺 `scene`，见 §5 |
 | `get_user_weibos` | `/ajax/statuses/mymblog?uid=&page=&feature=` | 同 | ✅ 一致 |
 | `get_weibo_detail` | `/ajax/statuses/show?id=X` | `/ajax/statuses/show?id=X&locale=zh-CN&isGetLongText=true` | ⚠️ 长文截断，见 §4 |
-| `get_comments` | `/ajax/statuses/buildComments` (unwrap=True) | 同 | 🐛 丢分页游标，见 §3 |
+| `get_comments` | `/ajax/statuses/buildComments` | 同 | ✅ 已修复（unwrap=False + `--max-id`），见 §3 |
 | `get_reposts` | `/ajax/statuses/repostTimeline` | 同 | ✅ 一致 |
 | `get_following` / `get_follow_content` | `/ajax/friendships/friends` + `/ajax/profile/followContent` | 同 | ✅ 一致 |
 | `search_weibo` | `m.weibo.cn/api/container/getIndex` | 同（需 `.weibo.cn` 会话） | ✅ 已修复（2026-07-11）：QR cdurl 跨域补建 `mobile_cookies`，见 §8 |
@@ -70,7 +70,7 @@ GET /ajax/feed/unreadfriendstimeline?list_id=100015555027006&refresh=4&since_id=
 
 ---
 
-## 3. 评论：`/ajax/statuses/buildComments`（🐛 分页游标丢失）
+## 3. 评论：`/ajax/statuses/buildComments`（✅ 已修复 2026-07-14）
 
 **请求**：`GET /ajax/statuses/buildComments?id=<idstr>&is_show_bulletin=2&count=20&flow=0[&max_id=<cursor>]`
 
@@ -89,13 +89,11 @@ GET /ajax/feed/unreadfriendstimeline?list_id=100015555027006&refresh=4&since_id=
 
 `data[0]` 关键字段：`created_at, id, rootid, rootidstr, floor_number, text, source, user, mid, idstr, liked, pic_num, ...`
 
-**问题**：我们 `get_comments` 用默认 `unwrap=True`，`_handle_response` 只返回 `data["data"]`（评论数组），**丢掉了 `max_id` 与 `total_number`**——导致：
-- 无法翻页（拿不到 `max_id` 传给下一页）
-- 拿不到总评论数
+**问题（已修复）**：我们 `get_comments` 原用默认 `unwrap=True`，`_handle_response` 只返回 `data["data"]`（评论数组），**丢掉了 `max_id` 与 `total_number`**——导致无法翻页、拿不到总评论数。
 
-**建议修复**：`get_comments` 改为 `unwrap=False`，返回完整 dict，render 层从 `data` 取评论、从 `max_id`/`total_number` 取分页元信息；并补 `--max-id` / 翻页参数与对应测试。（属 bug 修复，需配测试用例。）
+**修复**：`get_comments` 改 `unwrap=False` 返回完整 dict；`weibo comments` 加 `--max-id` 透传游标，纯文本渲染显示「共 N 条，本页 M」+ 下页 `--max-id` 提示，`--json` 暴露完整 `{max_id,total_number,data,...}`。端到端实测：`weibo comments <mblogid>` → page1 `max_id=X`；`--max-id X` → page2 不同评论、新 `max_id`。配测试 `tests/test_client.py::TestCommentsAPI` + `tests/test_cli.py::test_comments_renders_total_and_next_max_id`。
 
-> 注：`total_number`(99) 与 mblog 的 `comments_count`(104) 不完全一致，疑似被过滤（不可见评论等）。
+> 注：实测 `buildComments` 的 `id` 参数同时接受数字 idstr 与 base62 mblogid（两者均 ok=1、返回评论）；CLI 仍走 `get_weibo_detail(mblogid)` 先解析数字 id，未改（属优化非 bug）。`total_number` 与 mblog 的 `comments_count` 时同/时异（被过滤评论等），实测有 267↔258 不一致情况。
 
 ---
 
@@ -198,7 +196,7 @@ region_name, retweeted_status, ok
 
 ## 9. 落地优先级建议
 
-1. **§3 评论分页游标修复**（bug，配测试）→ 改 `unwrap=False` + 暴露 `max_id`/`total_number`
+1. **✅ §3 评论分页游标修复**（已落地 2026-07-14）→ `unwrap=False` + `--max-id` + 暴露 `max_id`/`total_number`
 2. **§4 详情长文** `isGetLongText=true` + 暴露 `text_raw`/`favorited`（bug 类，配测试）
 3. **§6 `profile/detail` 合并**（增强）→ `weibo profile` 更全
 4. **§7.1 `weibo favorites`**（新功能）
